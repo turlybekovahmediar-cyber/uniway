@@ -9,7 +9,7 @@ UniWay — сервис подготовки к стажировкам и пер
 ## 🌐 URL
 
 - **Локально**: http://localhost:3000
-- **Sandbox**: https://3000-i9ntn94n5bdtpfsiiqz9o-de59bda9.sandbox.novita.ai
+- **Deploy**: https://webapp-f21.pages.dev/
 
 ## ✅ Реализованные функции
 
