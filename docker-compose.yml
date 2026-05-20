@@ -4,12 +4,9 @@ services:
     container_name: uniway_web
     ports:
       - "3000:3000"
-    env_file:
-      - .env
     environment:
       - NODE_ENV=development
-      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
-      - CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}
+      - IS_DOCKER=true
     volumes:
       - .:/app
       - /app/node_modules
