@@ -1,0 +1,13 @@
+services:
+  uniway-app:
+    build: .
+    container_name: uniway_web
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - IS_DOCKER=true
+    volumes:
+      - .:/app
+      - /app/node_modules
+    restart: always
