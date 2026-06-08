@@ -175,14 +175,66 @@ function t(key) { return T[State.lang][key] || T['ru'][key] || key; }
 
 // ===== MOCK DATA =====
 const MOCK_TASKS = [
-  { id: 1, title: 'Python-разработчик: REST API', company: 'Kolesa Group', companyLogo: 'KG', direction: 'IT', level: 'Junior', deadline: '15 мая 2025', score: null, applicants: 47, description: 'Создай REST API на Python/FastAPI для системы бронирования автомобилей. Необходима авторизация JWT, CRUD операции.', tags: ['Python', 'FastAPI', 'REST API', 'JWT'], reward: '50 000 ₸', color: 'blue' },
-  { id: 2, title: 'SMM-стратегия для IT-компании', company: 'Chocofood', companyLogo: 'CF', direction: 'Маркетинг', level: 'Intern', deadline: '20 мая 2025', score: 78, applicants: 63, description: 'Разработай SMM-стратегию для Chocofood на 3 месяца: контент-план, метрики, целевая аудитория.', tags: ['SMM', 'Контент', 'Стратегия', 'Instagram'], reward: '30 000 ₸', color: 'orange' },
-  { id: 3, title: 'UI/UX дизайн мобильного приложения', company: 'Kaspi Bank', companyLogo: 'KB', direction: 'Дизайн', level: 'Junior', deadline: '25 мая 2025', score: null, applicants: 89, description: 'Спроектируй пользовательский интерфейс для мобильного приложения финансовых переводов.', tags: ['Figma', 'UI/UX', 'Mobile', 'Prototype'], reward: '60 000 ₸', color: 'purple' },
-  { id: 4, title: 'Frontend на React.js', company: 'Jusan Bank', companyLogo: 'JB', direction: 'IT', level: 'Junior', deadline: '18 мая 2025', score: 92, applicants: 34, description: 'Разработай компонент личного кабинета на React.js с использованием TypeScript и Tailwind CSS.', tags: ['React', 'TypeScript', 'CSS', 'API'], reward: '55 000 ₸', color: 'blue' },
-  { id: 5, title: 'Финансовый анализ стартапа', company: 'Forte Bank', companyLogo: 'FB', direction: 'Бизнес', level: 'Intern', deadline: '22 мая 2025', score: null, applicants: 21, description: 'Проведи анализ финансовых показателей стартапа и составь инвестиционный меморандум.', tags: ['Excel', 'Финансы', 'Анализ', 'PowerPoint'], reward: '35 000 ₸', color: 'green' },
-  { id: 6, title: 'Логотип и брендбук', company: 'Air Astana', companyLogo: 'AA', direction: 'Дизайн', level: 'Intern', deadline: '30 мая 2025', score: 85, applicants: 56, description: 'Создай логотип и базовый брендбук для нового сервиса Air Astana по управлению багажом.', tags: ['Adobe Illustrator', 'Брендинг', 'Логотип', 'Фирменный стиль'], reward: '40 000 ₸', color: 'red' },
-  { id: 7, title: 'Data Science: Анализ данных', company: 'Kcell', companyLogo: 'KC', direction: 'IT', level: 'Junior', deadline: '28 мая 2025', score: null, applicants: 28, description: 'Проведи анализ данных о клиентах мобильного оператора и выяви паттерны поведения пользователей.', tags: ['Python', 'Pandas', 'Machine Learning', 'Data Viz'], reward: '70 000 ₸', color: 'blue' },
-  { id: 8, title: 'Контент-план для YouTube', company: 'Beeline KZ', companyLogo: 'BL', direction: 'Маркетинг', level: 'Intern', deadline: '12 мая 2025', score: null, applicants: 44, description: 'Разработай контент-план для YouTube канала телеком-компании на 6 месяцев.', tags: ['YouTube', 'Контент', 'Видео', 'Аналитика'], reward: '25 000 ₸', color: 'orange' },
+  {
+    id: 1, title: 'REST API на Python/FastAPI', company: 'Kolesa Group', companyLogo: 'KG',
+    direction: 'IT', level: 'Junior', deadline: '15 июня 2025', score: null, applicants: 47,
+    description: 'Разработай REST API для системы бронирования автомобилей. Требования: авторизация через JWT, CRUD для сущностей Car и Booking, валидация входных данных, документация через Swagger. Язык — Python, фреймворк — FastAPI.',
+    tags: ['Python', 'FastAPI', 'JWT', 'REST API'], color: 'blue'
+  },
+  {
+    id: 2, title: 'SMM-стратегия на 3 месяца', company: 'Chocofood', companyLogo: 'CF',
+    direction: 'Маркетинг', level: 'Intern', deadline: '20 июня 2025', score: null, applicants: 63,
+    description: 'Разработай SMM-стратегию для Chocofood на квартал. Включи: анализ целевой аудитории, контент-план по неделям, KPI и метрики успеха, бюджетное распределение по платформам (Instagram, TikTok, Telegram). Обоснуй каждое решение.',
+    tags: ['SMM', 'Контент-план', 'Instagram', 'KPI'], color: 'orange'
+  },
+  {
+    id: 3, title: 'UX-аудит мобильного приложения', company: 'Kaspi Bank', companyLogo: 'KB',
+    direction: 'Дизайн', level: 'Junior', deadline: '25 июня 2025', score: null, applicants: 89,
+    description: 'Проведи UX-аудит раздела "Переводы" в мобильном банковском приложении. Найди минимум 5 проблем юзабилити, опиши каждую по severity (критическая/средняя/низкая), предложи конкретные решения с обоснованием. Результат — документ с скриншотами и мокапами исправлений.',
+    tags: ['UX', 'Figma', 'Аудит', 'Юзабилити'], color: 'purple'
+  },
+  {
+    id: 4, title: 'React-компонент личного кабинета', company: 'Jusan Bank', companyLogo: 'JB',
+    direction: 'IT', level: 'Junior', deadline: '18 июня 2025', score: null, applicants: 34,
+    description: 'Разработай компонент личного кабинета на React + TypeScript. Компонент должен: отображать баланс счетов, историю транзакций с фильтрацией, работать с mock API. Требования: TypeScript, адаптивная вёрстка, юнит-тесты на Jest.',
+    tags: ['React', 'TypeScript', 'Jest', 'Tailwind'], color: 'blue'
+  },
+  {
+    id: 5, title: 'Финансовый анализ стартапа', company: 'Forte Bank', companyLogo: 'FB',
+    direction: 'Бизнес', level: 'Intern', deadline: '22 июня 2025', score: null, applicants: 21,
+    description: 'Получи датасет финансовых показателей стартапа (выдаётся после принятия задания). Рассчитай unit economics, сделай DCF-оценку, определи runway и точку безубыточности. Результат — Excel-модель + 5-слайдовый инвестиционный меморандум.',
+    tags: ['Excel', 'DCF', 'Unit Economics', 'PowerPoint'], color: 'green'
+  },
+  {
+    id: 6, title: 'Брендбук для нового сервиса', company: 'Air Astana', companyLogo: 'AA',
+    direction: 'Дизайн', level: 'Intern', deadline: '30 июня 2025', score: null, applicants: 56,
+    description: 'Разработай логотип и базовый брендбук для нового сервиса Air Astana по отслеживанию багажа. Брендбук должен включать: логотип в 3 вариантах, цветовую палитру с кодами, типографику, примеры применения на UI-элементах.',
+    tags: ['Illustrator', 'Брендинг', 'Логотип', 'Figma'], color: 'red'
+  },
+  {
+    id: 7, title: 'Анализ оттока клиентов (Churn)', company: 'Kcell', companyLogo: 'KC',
+    direction: 'IT', level: 'Junior', deadline: '28 июня 2025', score: null, applicants: 28,
+    description: 'Используй предоставленный датасет клиентов мобильного оператора. Проведи EDA, постройте модель предсказания оттока (logistic regression или random forest), визуализируй ключевые факторы. Результат — Jupyter Notebook + краткий отчёт с инсайтами.',
+    tags: ['Python', 'Pandas', 'Scikit-learn', 'Matplotlib'], color: 'blue'
+  },
+  {
+    id: 8, title: 'Контент-план YouTube на 6 месяцев', company: 'Beeline KZ', companyLogo: 'BL',
+    direction: 'Маркетинг', level: 'Intern', deadline: '12 июня 2025', score: null, applicants: 44,
+    description: 'Разработай контент-стратегию для YouTube-канала телеком-компании на 6 месяцев. Включи: анализ конкурентов (3 канала), форматы видео с обоснованием, частоту публикаций, темы для 24 видео, метрики успеха. Объясни почему именно эти темы привлекут аудиторию.',
+    tags: ['YouTube', 'Контент', 'Аналитика', 'SEO'], color: 'orange'
+  },
+  {
+    id: 9, title: 'Система подбора персонала: регламент', company: 'Halyk Bank', companyLogo: 'HB',
+    direction: 'HR', level: 'Intern', deadline: '5 июля 2025', score: null, applicants: 18,
+    description: 'Разработай регламент найма для позиции "Junior Backend Developer". Документ должен включать: воронку подбора с этапами, шаблоны вопросов для каждого этапа, оценочные листы, критерии принятия решения, SLA по срокам. Обоснуй каждый этап.',
+    tags: ['HR', 'Рекрутинг', 'Документация', 'Оценка'], color: 'teal'
+  },
+  {
+    id: 10, title: 'Конкурентный анализ рынка EdTech', company: 'UniWay', companyLogo: 'UW',
+    direction: 'Бизнес', level: 'Intern', deadline: '10 июля 2025', score: null, applicants: 12,
+    description: 'Проведи конкурентный анализ рынка EdTech в Казахстане. Исследуй минимум 5 игроков: бизнес-модели, ценообразование, аудитория, сильные и слабые стороны. Составь матрицу позиционирования и дай рекомендации по стратегии для нового игрока.',
+    tags: ['Анализ рынка', 'SWOT', 'Стратегия', 'Excel'], color: 'indigo'
+  },
 ];
 
 const MOCK_STUDENTS = [
@@ -194,34 +246,49 @@ const MOCK_STUDENTS = [
 
 const AI_INTERVIEW_QUESTIONS = {
   IT: [
-    'Расскажите о своём опыте в разработке. Какие проекты вы реализовали?',
-    'Какой стек технологий вы знаете лучше всего? Приведите примеры использования.',
-    'Опишите ситуацию, когда вы столкнулись с трудной технической задачей. Как решили?',
-    'Как вы подходите к code review и работе в команде?',
-    'Где вы видите себя через 2 года в области разработки?',
+    'Расскажи о проекте, которым гордишься. Какой стек использовал и почему именно его?',
+    'Как бы ты оптимизировал страницу, которая грузится 6 секунд? Опиши конкретные шаги.',
+    'Объясни разницу между SQL и NoSQL. В каком случае выберешь MongoDB вместо PostgreSQL?',
+    'Как ты организуешь работу с git в команде из 5 человек? Какую стратегию ветвления используешь?',
+    'Тебе дали задачу, но требования размытые. PM недоступен. Как действуешь?',
   ],
   Маркетинг: [
-    'Как вы проводите анализ целевой аудитории для маркетинговой кампании?',
-    'Расскажите о самом успешном контент-проекте, который вы создали.',
-    'Как вы измеряете эффективность digital-маркетинга?',
-    'Опишите опыт работы с социальными сетями. Какие результаты достигли?',
-    'Как вы справляетесь с негативными комментариями от аудитории?',
+    'Тебе дали бюджет 300 000 тенге на продвижение приложения доставки. Как распределишь?',
+    'Как измеришь успех Instagram-кампании? Назови конкретные метрики и пороговые значения.',
+    'Конкурент резко снизил цены и забирает клиентов. Твои действия в первые 48 часов?',
+    'Расскажи о контент-провале — своём или чужом. Почему он провалился и что можно было сделать?',
+    'Как построишь контент-план на месяц для B2B-компании? Объясни логику выбора форматов.',
   ],
   Дизайн: [
-    'Расскажите о своём дизайн-процессе — от идеи до готового продукта.',
-    'Как вы проводите пользовательские исследования перед проектированием?',
-    'Какие инструменты дизайна вы используете и почему?',
-    'Как вы работаете с фидбеком от клиентов или разработчиков?',
-    'Опишите проект, которым вы больше всего гордитесь.',
+    'Клиент говорит "сделай покрасивее". Как ты работаешь с такими требованиями?',
+    'Как проводишь UX-исследование, если нет бюджета на фокус-группы?',
+    'Назови три казахстанских приложения с плохим UX и объясни конкретно что не так.',
+    'Разработчик говорит "это невозможно сверстать". Как выстраиваешь диалог?',
+    'Как ты презентуешь дизайн клиенту, который не понимает в дизайне?',
   ],
   Бизнес: [
-    'Расскажите о вашем опыте в бизнес-анализе или финансах.',
-    'Как вы подходите к решению нестандартных бизнес-задач?',
-    'Что для вас важнее — скорость или качество в работе? Почему?',
-    'Опишите ситуацию, когда вам пришлось работать под давлением дедлайна.',
-    'Какие ключевые метрики вы используете для оценки успеха проекта?',
+    'Как оцениваешь потенциальный рынок нового продукта? Покажи методику на примере.',
+    'Что такое unit economics и как их считать для подписочного сервиса?',
+    'Стартап тратит деньги быстрее плана. Ты аналитик. Что проверяешь в первую очередь?',
+    'Объясни разницу между gross margin и net margin. Где какой показатель важнее?',
+    'Как структурируешь презентацию для инвестора? Что обязательно должно быть на первых трёх слайдах?',
+  ],
+  HR: [
+    'Как оцениваешь культурный фит кандидата? Какие конкретно вопросы задаёшь?',
+    'Сотрудник стабильно опаздывает. Как будешь действовать — пошагово?',
+    'Как строишь онбординг для нового сотрудника? Что должно произойти в первые 30 дней?',
+    'Руководитель хочет уволить человека без объективных причин. Ты HR. Как реагируешь?',
+    'Как измеряешь эффективность HR-процессов? Назови 3 метрики которые отслеживаешь.',
+  ],
+  Финансы: [
+    'Объясни DCF-модель простыми словами. Когда она даёт неточные результаты?',
+    'Что такое EBITDA и почему компании любят показывать именно этот показатель инвесторам?',
+    'Тебе дали баланс компании. Какие три вещи смотришь в первую очередь?',
+    'Как инфляция и рост ставки ЦБ влияют на оценку акций? Объясни механику.',
+    'Чем отличается финансовая модель от бюджета? Когда нужен каждый инструмент?',
   ],
 };
+
 
 // ===== ROUTER =====
 function navigate(page, params = {}) {
@@ -1412,9 +1479,11 @@ function renderInterviewSetup() {
             <label class="form-label">Направление</label>
             <select class="form-select" id="interview-dir">
               <option value="IT">IT / Разработка</option>
-              <option value="Маркетинг">Маркетинг</option>
-              <option value="Дизайн">Дизайн</option>
+              <option value="Маркетинг">Маркетинг / SMM</option>
+              <option value="Дизайн">Дизайн / UX</option>
               <option value="Бизнес">Бизнес / Аналитика</option>
+              <option value="HR">HR / Управление персоналом</option>
+              <option value="Финансы">Финансы</option>
             </select>
           </div>
           <div class="form-group mb-0">
@@ -2943,37 +3012,60 @@ function addAIMessage(text, feedback = null, score = null) {
   setTimeout(scrollChatBottom, 100);
 }
 
-function sendAnswer() {
+async function sendAnswer() {
   const input = document.getElementById('user-answer');
   const text = input?.value?.trim();
   if (!text) return;
 
   const questions = AI_INTERVIEW_QUESTIONS[State.interviewDir] || AI_INTERVIEW_QUESTIONS.IT;
-  State.interviewMessages = [...State.interviewMessages, { role: 'user', text }];
+  State.interviewMessages = [...(State.interviewMessages || []), { role: 'user', text }];
   State.interviewTyping = true;
   renderApp();
   if (input) input.value = '';
+  setTimeout(scrollChatBottom, 100);
 
-  setTimeout(() => {
-    const score = Math.floor(Math.random() * 30) + 60;
-    State.interviewScore = Math.round(((State.interviewScore || 0) * State.interviewQ + score) / (State.interviewQ + 1));
+  try {
+    const res = await AUTH.apiCall('/api/interview/evaluate', 'POST', {
+      question: questions[State.interviewQ],
+      answer: text,
+      direction: State.interviewDir,
+      questionIndex: State.interviewQ,
+      totalQuestions: questions.length,
+    });
 
-    const feedbacks = [
-      'Хороший ответ! Вы показали понимание темы. Попробуйте добавить конкретные примеры из своего опыта.',
-      'Отличная структура ответа. Видна логическая последовательность мыслей.',
-      'Рекомендую быть более конкретным. Работодатели ценят примеры из реальной практики.',
-      'Профессиональная лексика на высоком уровне. Уверенность в изложении — сильная сторона.',
-    ];
-    const feedback = feedbacks[Math.floor(Math.random() * feedbacks.length)];
+    let score, feedback;
+    if (res.ok && res.data && res.data.score !== undefined) {
+      score    = res.data.score;
+      feedback = res.data.feedback;
+    } else {
+      // fallback если сервер недоступен
+      score    = Math.floor(text.length / 20) + 30;
+      score    = Math.min(75, Math.max(20, score));
+      feedback = 'Не удалось получить оценку от AI — проверьте подключение.';
+    }
 
+    State.interviewScore = Math.round(
+      ((State.interviewScore || 0) * State.interviewQ + score) / (State.interviewQ + 1)
+    );
     State.interviewQ++;
+
+    let nextMsg;
     if (State.interviewQ < questions.length) {
-      addAIMessage(`${feedback}\n\n**Следующий вопрос:** ${questions[State.interviewQ]}`, feedback, score);
+      nextMsg = `${feedback}\n\n**Следующий вопрос:** ${questions[State.interviewQ]}`;
     } else {
       State.interviewFinished = true;
-      addAIMessage(`Отличная работа! Собеседование завершено. 🎉\n\nТвой итоговый балл: **${State.interviewScore}/100**\n\nЯ проанализировал твои ответы. Нажми "Посмотреть результаты" для полного разбора.`, feedback, score);
+      nextMsg = `${feedback}\n\n---\nСобеседование завершено. Итоговый балл: **${State.interviewScore}/100**\n\nНажми «Посмотреть результаты» для полного разбора.`;
     }
-  }, 1800);
+
+    addAIMessage(nextMsg, feedback, score);
+
+  } catch (err) {
+    State.interviewTyping = false;
+    State.interviewMessages = [...State.interviewMessages, {
+      role: 'ai', text: 'Ошибка соединения с сервером. Попробуйте ещё раз.'
+    }];
+    renderApp();
+  }
 }
 
 function handleAnswerKey(e) {
