@@ -17,6 +17,97 @@ type Env = {
   AI: Ai
 }
 
+// ============================================================
+//  CACHE HELPERS  (Cloudflare Cache API)
+// ============================================================
+
+const CACHE_TTL = {
+  tasks: 300,        // 5 min  — static catalogue almost never changes
+  candidates: 60,    // 1 min  — company candidates list
+  adminStats: 30,    // 30 sec — admin platform stats
+  studentStats: 20,  // 20 sec — per-user stats (short, user-specific)
+}
+
+/** Build a deterministic cache key URL from a logical key string. */
+function cacheKey(key: string): string {
+  return `https://uniway-cache.internal/${key}`
+}
+
+/** Try to read a cached JSON response. Returns parsed value or null. */
+async function cacheGet<T>(key: string): Promise<T | null> {
+  try {
+    const cache = caches.default
+    const cached = await cache.match(new Request(cacheKey(key)))
+    if (!cached) return null
+    return (await cached.json()) as T
+  } catch {
+    return null
+  }
+}
+
+/** Store a JSON value in the Cache API with a TTL (seconds). */
+async function cacheSet(key: string, value: unknown, ttlSeconds: number): Promise<void> {
+  try {
+    const cache = caches.default
+    const response = new Response(JSON.stringify(value), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': `public, max-age=${ttlSeconds}`,
+      },
+    })
+    await cache.put(new Request(cacheKey(key)), response)
+  } catch {
+    // Cache writes are best-effort — never block the request
+  }
+}
+
+/** Invalidate one or more cache keys (fire-and-forget, use inside waitUntil). */
+async function cacheDelete(...keys: string[]): Promise<void> {
+  try {
+    const cache = caches.default
+    await Promise.all(keys.map(k => cache.delete(new Request(cacheKey(k)))))
+  } catch {
+    // Ignore cache-delete failures
+  }
+}
+
+// ============================================================
+//  BACKGROUND TASK QUEUE  (ctx.waitUntil wrappers)
+// ============================================================
+
+type BgTask = (db: D1Database) => Promise<void>
+
+/**
+ * Schedule background work via ctx.waitUntil so it doesn't block
+ * the HTTP response. Errors are silently swallowed — background
+ * tasks must never crash the Worker.
+ */
+function scheduleTask(ctx: ExecutionContext, task: () => Promise<void>): void {
+  ctx.waitUntil(
+    task().catch(err => console.error('[bg-task]', err))
+  )
+}
+
+/** Purge expired sessions older than 30 days from D1 (background). */
+async function bgPurgeSessions(db: D1Database): Promise<void> {
+  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+  await db.prepare('DELETE FROM sessions WHERE createdAt < ?').bind(cutoff).run()
+}
+
+/** Invalidate cache keys that depend on a user's submissions data (background). */
+async function bgInvalidateUserCaches(userId: string): Promise<void> {
+  await cacheDelete(
+    `studentStats:${userId}`,
+    'candidates',          // company view aggregates all students
+    'adminStats',
+  )
+}
+
+/** Invalidate admin/company-visible aggregate caches (background). */
+async function bgInvalidateAggregateCaches(): Promise<void> {
+  await cacheDelete('candidates', 'adminStats')
+}
+
 // ---- Domain types ----
 interface User {
   id: string
@@ -208,129 +299,100 @@ const TASK_CATALOGUE: Record<string, { id: number; title: string; company: strin
   ],
 }
 
-// ---- AI Feedback (real, via Workers AI) ----
+// ---- AI Feedback for task submissions ----
 async function getAIFeedback(
   ai: Ai,
   solution: string,
   direction: string,
-  score: number,
   lang: 'RU' | 'KZ' | 'EN' = 'RU'
-): Promise<string> {
+): Promise<{ score: number; feedback: string }> {
+
   const focusMap: Record<string, string> = {
-    IT: `
-- Правильность алгоритма и логики
-- Чистота и читаемость кода (именование, структура, DRY)
-- Обработка граничных случаев и ошибок
-- Выбор подходящих структур данных и паттернов
-- Масштабируемость и производительность решения`,
-    Маркетинг: `
-- Понимание целевой аудитории и её болей
-- Конкретность: есть ли измеримые метрики и KPI
-- Реалистичность стратегии в условиях рынка Казахстана
-- Обоснованность выбора каналов продвижения
-- Наличие плана B на случай провала`,
-    Дизайн: `
-- Понимание пользовательских потребностей (не только эстетика)
-- Обоснованность дизайн-решений исследованием
-- Знание UI/UX принципов (иерархия, типографика, доступность)
-- Готовность к итерациям и критике
-- Практическая реализуемость решения`,
-    Бизнес: `
-- Структурированность мышления (MECE, frameworks)
-- Обоснованность выводов данными, а не интуицией
-- Понимание финансовых метрик и их взаимосвязей
-- Учёт рисков и альтернативных сценариев
-- Практическая применимость в казахстанском контексте`,
-    HR: `
-- Умение работать с конфликтными ситуациями
-- Знание трудового законодательства РК
-- Системный подход к HR-процессам
-- Эмпатия в сочетании с принципиальностью
-- Конкретные инструменты и метрики, а не общие слова`,
-    Финансы: `
-- Точность финансовой терминологии
-- Понимание взаимосвязей между показателями
-- Умение интерпретировать данные, а не просто называть формулы
-- Понимание рисков и допущений в расчётах
-- Знание реалий казахстанского и международного рынка`,
-    Юриспруденция: `
-- Точность правовых формулировок
-- Ссылки на конкретные нормы законодательства РК
-- Практическое мышление, а не только теория
-- Умение видеть риски и альтернативные толкования
-- Профессиональная этика и независимость суждений`,
+    IT: 'правильность логики и алгоритма, чистота кода, обработка ошибок, выбор структур данных',
+    Маркетинг: 'конкретность стратегии, наличие метрик и KPI, реалистичность бюджета, понимание аудитории',
+    Дизайн: 'обоснованность решений, понимание пользователя, знание UX-принципов, проработанность деталей',
+    Бизнес: 'структурированность мышления, обоснованность цифрами, учёт рисков, практичность выводов',
+    HR: 'системность подхода, знание процессов, конкретные инструменты и метрики',
+    Финансы: 'точность терминологии, понимание взаимосвязей показателей, обоснованность расчётов',
+    Аналитика: 'методология анализа, качество визуализации, глубина инсайтов, практичность выводов',
+    Контент: 'структура и логика, качество текста, SEO-грамотность, соответствие задаче',
+    SMM: 'креативность, соответствие аудитории, измеримость результатов, трендовость',
   }
   const focus = focusMap[direction] || focusMap['IT']
 
   const langInstr: Record<string, string> = {
-    RU: 'Отвечай ТОЛЬКО на русском языке.',
+    RU: 'Отвечай строго на русском языке.',
     KZ: 'Тек қазақ тілінде жауап бер.',
-    EN: 'Respond ONLY in English.',
+    EN: 'Respond strictly in English.',
   }
 
-  const prompt = `Ты — опытный HR-менеджер и эксперт-ментор платформы UniWay. Твоя задача — дать ЧЕСТНУЮ, КОНКРЕТНУЮ и ДЕЛОВУЮ оценку ответа кандидата. 
-
-Никакой лишней вежливости. Никаких шаблонных похвал. Если ответ слабый — скажи прямо и объясни почему.
+  const prompt = `Ты — строгий эксперт-ментор платформы UniWay (Казахстан). Оцени решение студента объективно.
 
 Направление: ${direction}
-Автоматический балл системы: ${score}/100
+Критерии оценки: ${focus}
 
-Ответ кандидата:
+Решение студента:
 """
 ${solution.substring(0, 1500)}
 """
 
-Критерии оценки для направления ${direction}:
-${focus}
+Правила выставления балла:
+- 85-100: Решение полное, конкретное, с обоснованием, видна реальная компетентность
+- 65-84: Решение верное, но поверхностное или без деталей
+- 40-64: Частично верное, есть существенные пробелы
+- 0-39: Решение слабое, не по теме или слишком короткое
 
-ФОРМАТ ОТВЕТА (строго соблюдай):
-**Оценка:** [одно предложение — честный вердикт, без воды]
+ВАЖНО: Если решение короче 50 слов — максимум 45 баллов. Не завышай оценку.
 
-**Что работает:**
-- [конкретный плюс из ответа, если есть]
+Ответь ТОЛЬКО валидным JSON без лишнего текста:
+{"score": <число 0-100>, "feedback": "<3-4 предложения: что конкретно хорошо или плохо, чего не хватает, что сделать дальше>"}
 
-**Что не работает / чего не хватает:**
-- [конкретный минус с объяснением]
-- [второй минус, если есть]
-
-**Конкретное действие:**
-[Одна конкретная рекомендация что сделать прямо сейчас — курс, практика, что изучить]
-
-Объём: 120-180 слов. Без вступлений и заключений.
 ${langInstr[lang]}`
 
   try {
-    const result = await ai.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+    const result = await ai.run('@cf/meta/llama-3.1-8b-instruct', {
       messages: [
         {
           role: 'system',
-          content: 'Ты строгий, но справедливый ментор. Говоришь прямо, без лишних слов. Шаблонные фразы типа "хороший ответ" или "отличная работа" под запретом.',
+          content: 'Ты строгий эксперт. Не завышай оценки. Шаблонные фразы запрещены. Отвечай только JSON.',
         },
         { role: 'user', content: prompt },
       ],
-      max_tokens: 500,
-      temperature: 0.4,
+      max_tokens: 350,
+      temperature: 0.3,
     }) as { response: string }
-    return result.response?.trim() || fallbackFeedback(score, direction)
+
+    const raw = result.response?.trim() || ''
+    const match = raw.match(/\{[\s\S]*?\}/)
+    if (match) {
+      const parsed = JSON.parse(match[0])
+      const score = Math.max(0, Math.min(100, Math.round(Number(parsed.score) || 50)))
+      const feedback = String(parsed.feedback || '').trim()
+      return { score, feedback: feedback || fallbackFeedback(score, direction) }
+    }
+    throw new Error('no json')
   } catch {
-    return fallbackFeedback(score, direction)
+    const score = Math.min(60, Math.max(20, Math.floor(solution.length / 30)))
+    return { score, feedback: fallbackFeedback(score, direction) }
   }
 }
 
 function fallbackFeedback(score: number, direction: string): string {
-  const dirTips: Record<string, string> = {
-    IT: 'Покажи конкретный код или архитектурное решение — без этого оценить нечего.',
-    Маркетинг: 'Добавь конкретные метрики и бюджетный расчёт — иначе это просто идеи.',
-    Дизайн: 'Объясни решение через пользовательскую задачу, а не только через эстетику.',
-    Бизнес: 'Обоснуй цифрами. Любое утверждение без данных — это мнение, не анализ.',
-    HR: 'Ссылайся на конкретные инструменты и процессы, а не на общие принципы.',
-    Финансы: 'Назови конкретные метрики и формулы — теория без расчётов не считается.',
-    Юриспруденция: 'Ссылайся на конкретные статьи законов РК, а не на общие нормы.',
+  const tips: Record<string, string> = {
+    IT: 'Покажи конкретный код или архитектуру — без этого нечего оценивать.',
+    Маркетинг: 'Добавь метрики и бюджетный расчёт — идеи без цифр не работают.',
+    Дизайн: 'Обоснуй решения через задачу пользователя, а не только эстетику.',
+    Бизнес: 'Подкрепи выводы конкретными цифрами — иначе это просто мнение.',
+    HR: 'Ссылайся на конкретные инструменты и процессы, а не общие принципы.',
+    Финансы: 'Назови конкретные формулы и метрики с расчётами.',
+    Аналитика: 'Покажи методику и конкретные выводы из данных.',
+    Контент: 'Улучши структуру и добавь конкретные примеры.',
+    SMM: 'Добавь конкретные метрики и обоснование выбора платформ.',
   }
-  const tip = dirTips[direction] || dirTips['IT']
-  if (score >= 80) return `Технически приемлемо, но есть куда расти. ${tip}`
-  if (score >= 60) return `Базовый уровень. Для реального собеседования этого недостаточно. ${tip}`
-  return `Слабый ответ. ${tip} Изучи материал глубже и попробуй снова.`
+  const tip = tips[direction] || tips['IT']
+  if (score >= 75) return `Приемлемо, но есть куда расти. ${tip}`
+  if (score >= 50) return `Базовый уровень. Для реального собеседования недостаточно. ${tip}`
+  return `Слабый ответ. ${tip} Изучи тему глубже и попробуй снова.`
 }
 
 // ---- Detect language from Accept-Language or user profile ----
@@ -348,13 +410,27 @@ async function requireAuth(c: any, db: D1Database): Promise<User | null> {
 }
 
 // ============================================================
-const app = new Hono<{ Bindings: Env }>()
+const app = new Hono<{ Bindings: Env; Variables: { ctx: ExecutionContext } }>()
 
 app.use('/api/*', cors({
   origin: '*',
   allowHeaders: ['Content-Type', 'Authorization'],
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 }))
+
+// Store ExecutionContext in c.var so any route handler can call waitUntil.
+// Falls back to a no-op stub when running under Vitest (no real Workers runtime).
+app.use('*', async (c, next) => {
+  try {
+    // @ts-ignore
+    const ctx = (c as any).executionCtx as ExecutionContext
+    c.set('ctx', ctx)
+  } catch {
+    // Vitest / non-Workers env: stub so scheduleTask becomes a no-op
+    c.set('ctx', { waitUntil: () => {}, passThroughOnException: () => {} } as ExecutionContext)
+  }
+  await next()
+})
 
 app.use('/static/*', serveStatic({ root: './' }))
 
@@ -448,6 +524,11 @@ app.post('/api/auth/login', async (c) => {
     .bind(token, user.id, new Date().toISOString())
     .run()
 
+  // Background: probabilistic session cleanup (~10% of logins to avoid D1 overload)
+  if (Math.random() < 0.1) {
+    scheduleTask(c.get('ctx'), () => bgPurgeSessions(c.env.DB))
+  }
+
   return c.json({
     success: true,
     token,
@@ -504,6 +585,10 @@ app.put('/api/auth/profile', async (c) => {
   ).run()
 
   const updated = await db.prepare('SELECT * FROM users WHERE id = ?').bind(user.id).first<User>()
+
+  // Background: profile changes can affect the candidates list for companies
+  scheduleTask(c.get('ctx'), () => bgInvalidateAggregateCaches())
+
   return c.json({ success: true, user: safeUser(updated!) })
 })
 
@@ -533,13 +618,25 @@ app.put('/api/auth/change-password', async (c) => {
 // ============================================================
 
 // GET /api/tasks  — list tasks (filter by direction)
-app.get('/api/tasks', (c) => {
+app.get('/api/tasks', async (c) => {
   const direction = c.req.query('direction')
+  const key = direction ? `tasks:${direction}` : 'tasks:all'
+
+  // Try cache first
+  const cached = await cacheGet<{ tasks: unknown[]; total: number }>(key)
+  if (cached) return c.json(cached)
+
+  let payload: { tasks: { id: number; title: string; company: string; description: string }[]; total: number }
   if (direction && TASK_CATALOGUE[direction]) {
-    return c.json({ tasks: TASK_CATALOGUE[direction], total: TASK_CATALOGUE[direction].length })
+    payload = { tasks: TASK_CATALOGUE[direction], total: TASK_CATALOGUE[direction].length }
+  } else {
+    const all = Object.values(TASK_CATALOGUE).flat()
+    payload = { tasks: all, total: all.length }
   }
-  const all = Object.values(TASK_CATALOGUE).flat()
-  return c.json({ tasks: all, total: all.length })
+
+  // Cache in background — don't block the response
+  scheduleTask(c.get('ctx'), () => cacheSet(key, payload, CACHE_TTL.tasks))
+  return c.json(payload)
 })
 
 // GET /api/tasks/:id
@@ -636,15 +733,13 @@ app.put('/api/submissions/:id', async (c) => {
 
   // AI evaluation when student submits solution
   if (body.status === 'submitted' && sub.status !== 'evaluated') {
-    const solution = solutionText || sub.solutionText || '(решение не предоставлено)'
+    const solution = solutionText || sub.solutionText || ''
     const direction = sub.direction || user.direction || 'IT'
-
-    // Score: base random + bonus for solution length
-    const baseScore = Math.floor(Math.random() * 25) + 65 // 65–90
-    score = Math.min(100, baseScore + (solution.length > 300 ? 5 : 0))
-
     const lang = detectLang(c)
-    feedback = await getAIFeedback(c.env.AI, solution, direction, score, lang)
+
+    const aiResult = await getAIFeedback(c.env.AI, solution, direction, lang)
+    score = aiResult.score
+    feedback = aiResult.feedback
     status = 'evaluated'
   }
 
@@ -653,21 +748,16 @@ app.put('/api/submissions/:id', async (c) => {
   `).bind(status, solutionText ?? sub.solutionText, score ?? sub.score, feedback ?? sub.feedback, subId).run()
 
   const updated = await db.prepare('SELECT * FROM submissions WHERE id=?').bind(subId).first<Submission>()
+
+  // Background: invalidate caches that include this user's stats/scores
+  scheduleTask(c.get('ctx'), () => bgInvalidateUserCaches(user.id))
+
   return c.json({ success: true, submission: updated })
 })
 
 // ============================================================
-//  INTERVIEW EVALUATION  (real AI, not random)
+//  INTERVIEW AI EVALUATION
 // ============================================================
-
-const InterviewEvalSchema = z.object({
-  question: z.string().min(1),
-  answer: z.string().min(1),
-  direction: z.string().default('IT'),
-  questionIndex: z.number().default(0),
-  totalQuestions: z.number().default(5),
-  history: z.array(z.any()).optional(),
-})
 
 app.post('/api/interview/evaluate', async (c) => {
   const db = c.env.DB
@@ -678,80 +768,85 @@ app.post('/api/interview/evaluate', async (c) => {
   try { raw = await c.req.json() }
   catch { return c.json({ error: 'Неверный формат данных' }, 400) }
 
-  const parsed = InterviewEvalSchema.safeParse(raw)
+  const schema = z.object({
+    question: z.string().min(1),
+    answer: z.string().min(1),
+    direction: z.string().default('IT'),
+    questionIndex: z.number().default(0),
+    totalQuestions: z.number().default(5),
+  })
+  const parsed = schema.safeParse(raw)
   if (!parsed.success) return c.json({ error: parsed.error.errors[0]?.message }, 400)
 
   const { question, answer, direction, questionIndex, totalQuestions } = parsed.data
   const lang = detectLang(c)
 
   const langInstr: Record<string, string> = {
-    RU: 'Отвечай ТОЛЬКО на русском языке.',
+    RU: 'Отвечай строго на русском языке.',
     KZ: 'Тек қазақ тілінде жауап бер.',
-    EN: 'Respond ONLY in English.',
+    EN: 'Respond strictly in English.',
   }
 
-  const evalPrompt = `Ты — строгий HR-эксперт и ментор на платформе UniWay (Казахстан).
+  const prompt = `Ты — опытный HR-эксперт на платформе UniWay (Казахстан). Проводишь симуляцию собеседования.
 
 Направление кандидата: ${direction}
 Вопрос ${questionIndex + 1} из ${totalQuestions}: "${question}"
 
 Ответ кандидата:
 """
-${answer.substring(0, 1000)}
+${answer.substring(0, 800)}
 """
 
-Твоя задача:
-1. Поставь балл от 0 до 100 исходя из РЕАЛЬНОГО качества ответа
-2. Дай конкретную обратную связь — без шаблонов, без лишней вежливости
-
 Правила выставления балла:
-- 85-100: Ответ развёрнутый, конкретный, с примерами, показывает реальный опыт
-- 65-84: Ответ правильный, но поверхностный или без примеров
-- 40-64: Ответ частично верный, есть серьёзные пробелы
-- 0-39: Ответ не по теме, слишком короткий или некомпетентный
+- 80-100: Ответ развёрнутый, конкретный, с примерами из практики
+- 60-79: Ответ правильный, но поверхностный или без примеров
+- 35-59: Частично верный, есть серьёзные пробелы
+- 0-34: Слишком короткий, не по теме или некомпетентный
 
-ВАЖНО: Короткий ответ из 1-2 предложений без примеров — максимум 55 баллов. Не завышай оценки.
+Ответ из 1-2 предложений без конкретики — максимум 45 баллов. Не завышай.
 
-Ответь СТРОГО в формате JSON (ничего лишнего, только JSON):
-{
-  "score": <число от 0 до 100>,
-  "feedback": "<2-4 предложения: что хорошо (если есть), что конкретно не хватает, что сделать>"
-}
+Ответь ТОЛЬКО валидным JSON:
+{"score": <0-100>, "feedback": "<2-3 конкретных предложения: что хорошо/плохо в ответе и что улучшить>"}
 
 ${langInstr[lang]}`
 
   try {
-    const result = await c.env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+    const result = await c.env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
       messages: [
-        {
-          role: 'system',
-          content: 'Ты строгий, честный эксперт. Никогда не завышай оценки. Шаблонные фразы запрещены. Отвечай только валидным JSON.',
-        },
-        { role: 'user', content: evalPrompt },
+        { role: 'system', content: 'Строгий HR-эксперт. Не завышай оценки. Только JSON в ответе.' },
+        { role: 'user', content: prompt },
       ],
-      max_tokens: 300,
+      max_tokens: 250,
       temperature: 0.3,
     }) as { response: string }
 
-    // Parse AI JSON response
-    const raw = result.response?.trim() || ''
-    const jsonMatch = raw.match(/\{[\s\S]*\}/)
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0])
-      const score = Math.max(0, Math.min(100, Math.round(Number(parsed.score) || 50)))
-      const feedback = String(parsed.feedback || '').trim()
-      return c.json({ score, feedback: feedback || fallbackFeedback(score, direction) })
+    const text = result.response?.trim() || ''
+    const match = text.match(/\{[\s\S]*?\}/)
+    if (match) {
+      const data = JSON.parse(match[0])
+      const score = Math.max(0, Math.min(100, Math.round(Number(data.score) || 50)))
+      const feedback = String(data.feedback || '').trim()
+      return c.json({ score, feedback })
     }
-    throw new Error('No JSON in AI response')
+    throw new Error('no json')
   } catch {
-    // Fallback: score based on answer length + random
-    const lengthScore = Math.min(30, Math.floor(answer.length / 20))
-    const score = Math.max(20, Math.min(75, 30 + lengthScore + Math.floor(Math.random() * 20)))
-    return c.json({ score, feedback: fallbackFeedback(score, direction) })
+    // Fallback: score by answer length
+    const score = Math.min(60, Math.max(15, Math.floor(answer.length / 15)))
+    const fallbacks: Record<string, string> = {
+      IT: 'Ответ слишком общий. Назови конкретные технологии и приведи пример из практики.',
+      Маркетинг: 'Не хватает конкретных цифр и метрик. Обоснуй свой подход данными.',
+      Дизайн: 'Объясни решение через задачу пользователя, а не через визуал.',
+      Бизнес: 'Подкрепи ответ конкретными расчётами или примерами.',
+      HR: 'Назови конкретные инструменты и метрики, а не общие принципы.',
+      Финансы: 'Приведи конкретные формулы и числовые примеры.',
+    }
+    return c.json({ score, feedback: fallbacks[direction] || 'Развернись подробнее и приведи конкретный пример.' })
   }
 })
 
-
+// ============================================================
+//  INTERVIEW RESULTS
+// ============================================================
 
 // GET /api/interviews
 app.get('/api/interviews', async (c) => {
@@ -790,6 +885,10 @@ app.post('/api/interviews', async (c) => {
   `).bind(id, user.id, direction || 'IT', Math.min(100, Math.max(0, score)), date, questionsCount || 5, feedback || '').run()
 
   const result = await db.prepare('SELECT * FROM interview_results WHERE id=?').bind(id).first<InterviewResult>()
+
+  // Background: invalidate user-specific and aggregate caches
+  scheduleTask(c.get('ctx'), () => bgInvalidateUserCaches(user.id))
+
   return c.json({ success: true, interview: result }, 201)
 })
 
@@ -803,6 +902,10 @@ app.get('/api/student/stats', async (c) => {
   const user = await requireAuth(c, db)
   if (!user) return c.json({ error: 'Не авторизован' }, 401)
   if (user.role !== 'student') return c.json({ error: 'Доступ запрещён' }, 403)
+
+  const key = `studentStats:${user.id}`
+  const cached = await cacheGet<object>(key)
+  if (cached) return c.json(cached)
 
   const { results: subs } = await db
     .prepare('SELECT * FROM submissions WHERE userId=?')
@@ -819,7 +922,7 @@ app.get('/api/student/stats', async (c) => {
   const avgInterviewScore = interviews.length > 0
     ? Math.round(interviews.reduce((a, b) => a + b.score, 0) / interviews.length) : 0
 
-  return c.json({
+  const payload = {
     tasksCompleted: evaluated.length,
     tasksInProgress: subs.filter(s => s.status === 'in_progress').length,
     avgScore,
@@ -827,7 +930,10 @@ app.get('/api/student/stats', async (c) => {
     avgInterviewScore,
     recentSubmissions: subs.slice(0, 3),
     recentInterviews: interviews.slice(0, 3),
-  })
+  }
+
+  scheduleTask(c.get('ctx'), () => cacheSet(key, payload, CACHE_TTL.studentStats))
+  return c.json(payload)
 })
 
 // ============================================================
@@ -840,6 +946,10 @@ app.get('/api/company/candidates', async (c) => {
   const user = await requireAuth(c, db)
   if (!user) return c.json({ error: 'Не авторизован' }, 401)
   if (user.role !== 'company') return c.json({ error: 'Доступ запрещён' }, 403)
+
+  const key = 'candidates'
+  const cached = await cacheGet<object>(key)
+  if (cached) return c.json(cached)
 
   // Return students with their avg scores
   const { results } = await db
@@ -854,7 +964,9 @@ app.get('/api/company/candidates', async (c) => {
     `)
     .all()
 
-  return c.json({ candidates: results, total: results.length })
+  const payload = { candidates: results, total: results.length }
+  scheduleTask(c.get('ctx'), () => cacheSet(key, payload, CACHE_TTL.candidates))
+  return c.json(payload)
 })
 
 // ============================================================
@@ -879,17 +991,24 @@ app.get('/api/users/stats', async (c) => {
   const user = await requireAuth(c, db)
   if (!user || user.role !== 'admin') return c.json({ error: 'Доступ запрещён' }, 403)
 
+  const key = 'adminStats'
+  const cached = await cacheGet<object>(key)
+  if (cached) return c.json(cached)
+
   const studentsRow = await db.prepare("SELECT COUNT(*) as n FROM users WHERE role='student'").first<{ n: number }>()
   const companiesRow = await db.prepare("SELECT COUNT(*) as n FROM users WHERE role='company'").first<{ n: number }>()
   const subsRow = await db.prepare('SELECT COUNT(*) as n FROM submissions').first<{ n: number }>()
   const interviewsRow = await db.prepare('SELECT COUNT(*) as n FROM interview_results').first<{ n: number }>()
 
-  return c.json({
+  const payload = {
     totalStudents: studentsRow?.n ?? 0,
     totalCompanies: companiesRow?.n ?? 0,
     totalSubmissions: subsRow?.n ?? 0,
     totalInterviews: interviewsRow?.n ?? 0,
-  })
+  }
+
+  scheduleTask(c.get('ctx'), () => cacheSet(key, payload, CACHE_TTL.adminStats))
+  return c.json(payload)
 })
 
 // ============================================================

@@ -1,0 +1,75 @@
+name: 🗄️ D1 Database Backup
+
+on:
+  # Каждый день в 03:00 UTC
+  schedule:
+    - cron: '0 3 * * *'
+  # Ручной запуск из GitHub UI
+  workflow_dispatch:
+    inputs:
+      tables:
+        description: 'Таблицы через запятую (пусто = все)'
+        required: false
+        default: ''
+
+jobs:
+  backup:
+    name: Backup D1 → Branch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Нужен полный fetch для работы с веткой backups
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python deps
+        run: pip install requests
+
+      - name: Setup Node.js (для wrangler)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      - name: Run backup script
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+          BACKUP_TABLES: ${{ github.event.inputs.tables }}
+        run: python src/backup_d1.py
+
+      - name: Commit backup to branch
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Создаём ветку backups если нет
+          git fetch origin backups 2>/dev/null || true
+          git checkout backups 2>/dev/null || git checkout --orphan backups
+
+          # Добавляем только файлы бэкапа
+          git add backups/
+          git diff --cached --quiet && echo "No changes to backup" && exit 0
+
+          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
+          git commit -m "backup: D1 snapshot ${TIMESTAMP}"
+          git push origin backups
+
+      - name: Upload backup as artifact (7 дней)
+        uses: actions/upload-artifact@v4
+        with:
+          name: d1-backup-${{ github.run_id }}
+          path: backups/
+          retention-days: 7
