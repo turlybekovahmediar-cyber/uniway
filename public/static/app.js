@@ -327,6 +327,9 @@ function renderApp() {
   attachEventListeners();
   initScrollReveal();
   updateNavbar();
+  if (State.currentPage === 'login' || State.currentPage === 'register') {
+    initGoogleButton();
+  }
 }
 
 // ===== NAVBAR =====
@@ -961,24 +964,13 @@ function renderLoginPage() {
           </button>
         </form>
 
-        <!-- Google Sign-In -->
         ${window.GOOGLE_CLIENT_ID ? `
         <div class="my-5 flex items-center gap-3">
           <div class="flex-1 h-px bg-gray-200"></div>
           <span class="text-xs text-gray-400 font-medium">ИЛИ</span>
           <div class="flex-1 h-px bg-gray-200"></div>
         </div>
-        <div id="google-signin-login" class="flex justify-center">
-          <div id="g_id_onload"
-            data-client_id="${window.GOOGLE_CLIENT_ID}"
-            data-callback="handleGoogleCredentialResponse"
-            data-auto_prompt="false">
-          </div>
-          <div class="g_id_signin" data-type="standard" data-shape="rectangular"
-            data-theme="outline" data-text="signin_with" data-size="large"
-            data-locale="ru" data-width="340">
-          </div>
-        </div>` : ''}
+        <div id="google-btn-login" class="flex justify-center min-h-[44px]"></div>` : ''}
 
         <!-- Divider -->
         <div class="my-6 flex items-center gap-3">
@@ -1124,12 +1116,7 @@ function renderRegisterPage() {
           <span class="text-xs text-gray-400 font-medium">ИЛИ войдите через Google</span>
           <div class="flex-1 h-px bg-gray-200"></div>
         </div>
-        <div class="flex justify-center">
-          <div class="g_id_signin" data-type="standard" data-shape="rectangular"
-            data-theme="outline" data-text="signup_with" data-size="large"
-            data-locale="ru" data-width="340">
-          </div>
-        </div>` : ''}
+        <div id="google-btn-register" class="flex justify-center min-h-[44px]"></div>` : ''}
 
         <p class="text-center text-sm text-gray-500 mt-6">
           Уже есть аккаунт? <button onclick="navigate('login')" class="text-blue-600 font-medium hover:underline">Войти</button>
@@ -2902,6 +2889,49 @@ async function handleLogin(e) {
   } catch (err) {
     showFormError('login-error','login-error-text','Ошибка соединения с сервером');
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> ' + t('login_btn'); }
+  }
+}
+
+// --- GOOGLE SIGN-IN BUTTON (programmatic init for SPA) ---
+// GIS loads async — by the time the SPA renders the login page, the script
+// may already have run its DOM scan. We must call initialize/renderButton manually.
+function initGoogleButton() {
+  if (!window.GOOGLE_CLIENT_ID) return;
+
+  const tryInit = () => {
+    if (!window.google?.accounts?.id) return;
+
+    google.accounts.id.initialize({
+      client_id: window.GOOGLE_CLIENT_ID,
+      callback: handleGoogleCredentialResponse,
+      auto_select: false,
+    });
+
+    const cfg = { theme: 'outline', size: 'large', locale: 'ru', width: 340 };
+
+    const loginEl = document.getElementById('google-btn-login');
+    if (loginEl) {
+      loginEl.innerHTML = '';
+      google.accounts.id.renderButton(loginEl, { ...cfg, text: 'signin_with' });
+    }
+
+    const regEl = document.getElementById('google-btn-register');
+    if (regEl) {
+      regEl.innerHTML = '';
+      google.accounts.id.renderButton(regEl, { ...cfg, text: 'signup_with' });
+    }
+  };
+
+  // Try immediately; if GIS not loaded yet, wait for it
+  if (window.google?.accounts?.id) {
+    tryInit();
+  } else {
+    window.addEventListener('google-gsi-loaded', tryInit, { once: true });
+    // Fallback poll — handles edge cases where the custom event was missed
+    const poll = setInterval(() => {
+      if (window.google?.accounts?.id) { clearInterval(poll); tryInit(); }
+    }, 200);
+    setTimeout(() => clearInterval(poll), 5000);
   }
 }
 

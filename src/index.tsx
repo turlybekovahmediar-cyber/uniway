@@ -1370,7 +1370,8 @@ function getHTML(env?: Env): string {
   <!-- Cloudflare Turnstile CAPTCHA -->
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
   <!-- Google Identity Services (Sign-In with Google) -->
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="https://accounts.google.com/gsi/client" async defer
+    onload="window.dispatchEvent(new Event('google-gsi-loaded'))"></script>
   <script>
     window.TURNSTILE_SITE_KEY = '${turnstileSiteKey}';
     window.GOOGLE_CLIENT_ID   = '${googleClientId}';
