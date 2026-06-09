@@ -953,10 +953,32 @@ function renderLoginPage() {
               </button>
             </div>
           </div>
+          <!-- Cloudflare Turnstile CAPTCHA -->
+          <div class="cf-turnstile my-3" data-sitekey="${window.TURNSTILE_SITE_KEY || '1x00000000000000000000AA'}" data-theme="light" id="login-turnstile"></div>
+
           <button type="submit" id="login-submit-btn" class="btn btn-primary w-full btn-lg mt-2">
             <i class="fas fa-sign-in-alt"></i> ${t('login_btn')}
           </button>
         </form>
+
+        <!-- Google Sign-In -->
+        ${window.GOOGLE_CLIENT_ID ? `
+        <div class="my-5 flex items-center gap-3">
+          <div class="flex-1 h-px bg-gray-200"></div>
+          <span class="text-xs text-gray-400 font-medium">ИЛИ</span>
+          <div class="flex-1 h-px bg-gray-200"></div>
+        </div>
+        <div id="google-signin-login" class="flex justify-center">
+          <div id="g_id_onload"
+            data-client_id="${window.GOOGLE_CLIENT_ID}"
+            data-callback="handleGoogleCredentialResponse"
+            data-auto_prompt="false">
+          </div>
+          <div class="g_id_signin" data-type="standard" data-shape="rectangular"
+            data-theme="outline" data-text="signin_with" data-size="large"
+            data-locale="ru" data-width="340">
+          </div>
+        </div>` : ''}
 
         <!-- Divider -->
         <div class="my-6 flex items-center gap-3">
@@ -1086,12 +1108,28 @@ function renderRegisterPage() {
             </label>
           </div>
           
+          <!-- Cloudflare Turnstile CAPTCHA -->
+          <div class="cf-turnstile my-3" data-sitekey="${window.TURNSTILE_SITE_KEY || '1x00000000000000000000AA'}" data-theme="light" id="reg-turnstile"></div>
+
           <button type="submit" id="reg-submit-btn" disabled
             class="btn btn-primary w-full btn-lg opacity-50 cursor-not-allowed transition-all"
             style="">
             <i class="fas fa-user-plus"></i> ${t('reg_btn')}
           </button>
         </form>
+
+        ${window.GOOGLE_CLIENT_ID ? `
+        <div class="my-5 flex items-center gap-3">
+          <div class="flex-1 h-px bg-gray-200"></div>
+          <span class="text-xs text-gray-400 font-medium">ИЛИ войдите через Google</span>
+          <div class="flex-1 h-px bg-gray-200"></div>
+        </div>
+        <div class="flex justify-center">
+          <div class="g_id_signin" data-type="standard" data-shape="rectangular"
+            data-theme="outline" data-text="signup_with" data-size="large"
+            data-locale="ru" data-width="340">
+          </div>
+        </div>` : ''}
 
         <p class="text-center text-sm text-gray-500 mt-6">
           Уже есть аккаунт? <button onclick="navigate('login')" class="text-blue-600 font-medium hover:underline">Войти</button>
@@ -1101,7 +1139,7 @@ function renderRegisterPage() {
       <!-- Security notice -->
       <div class="mt-4 p-4 rounded-xl bg-green-50 border border-green-100 text-sm text-green-700">
         <i class="fas fa-shield-alt mr-1"></i>
-        <strong>Безопасность:</strong> Ваш пароль хранится в зашифрованном виде (SHA-256 + соль). Мы никогда не сохраняем пароль в открытом виде.
+        <strong>Безопасность:</strong> Ваш пароль хранится в зашифрованном виде. Мы никогда не сохраняем пароль в открытом виде.
       </div>
     </div>
   </main>`;
@@ -2791,9 +2829,12 @@ async function handleRegister(e) {
   const btn = document.querySelector('#reg-submit-btn');
   if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Регистрация...'; }
 
+  // Get Turnstile token (undefined if widget not rendered yet)
+  const cfTurnstileToken = document.querySelector('#reg-turnstile [name="cf-turnstile-response"]')?.value || undefined;
+
   try {
     const { ok, data } = await AUTH.apiCall('/api/auth/register', 'POST', {
-      email, password, name, role, direction, university, companyName, industry
+      email, password, name, role, direction, university, companyName, industry, cfTurnstileToken
     });
 
     if (!ok) {
@@ -2835,8 +2876,10 @@ async function handleLogin(e) {
   const btn = document.querySelector('#login-submit-btn');
   if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Вход...'; }
 
+  const cfTurnstileToken = document.querySelector('#login-turnstile [name="cf-turnstile-response"]')?.value || undefined;
+
   try {
-    const { ok, data } = await AUTH.apiCall('/api/auth/login', 'POST', { email, password });
+    const { ok, data } = await AUTH.apiCall('/api/auth/login', 'POST', { email, password, cfTurnstileToken });
 
     if (!ok) {
       showFormError('login-error','login-error-text', data.error || 'Неверный email или пароль');
@@ -2859,6 +2902,26 @@ async function handleLogin(e) {
   } catch (err) {
     showFormError('login-error','login-error-text','Ошибка соединения с сервером');
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> ' + t('login_btn'); }
+  }
+}
+
+// --- GOOGLE SIGN-IN CALLBACK ---
+async function handleGoogleCredentialResponse(response) {
+  try {
+    const { ok, data } = await AUTH.apiCall('/api/auth/google', 'POST', { credential: response.credential });
+    if (!ok) { showNotification(data.error || 'Ошибка входа через Google', 'error'); return; }
+    AUTH.saveToken(data.token);
+    AUTH.saveUser(data.user);
+    State.currentUser = data.user;
+    State.currentRole = data.user.role;
+    showNotification(data.message || 'Добро пожаловать!', 'success');
+    setTimeout(() => {
+      if (data.user.role === 'admin') navigate('admin');
+      else if (data.user.role === 'company') navigate('company_dashboard');
+      else navigate('student_dashboard');
+    }, 400);
+  } catch {
+    showNotification('Ошибка соединения при входе через Google', 'error');
   }
 }
 

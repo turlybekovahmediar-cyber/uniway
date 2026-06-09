@@ -16,6 +16,8 @@ jobs:
   backup:
     name: Backup D1 → Branch
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -36,7 +38,7 @@ jobs:
       - name: Setup Node.js (для wrangler)
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install wrangler
@@ -51,9 +53,14 @@ jobs:
         run: python src/backup_d1.py
 
       - name: Commit backup to branch
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Настраиваем аутентификацию через токен явно
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
 
           # Создаём ветку backups если нет
           git fetch origin backups 2>/dev/null || true
@@ -65,7 +72,7 @@ jobs:
 
           TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
           git commit -m "backup: D1 snapshot ${TIMESTAMP}"
-          git push origin backups
+          git push -u origin backups
 
       - name: Upload backup as artifact (7 дней)
         uses: actions/upload-artifact@v4

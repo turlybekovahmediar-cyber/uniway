@@ -6,9 +6,19 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
-  // "vars": {
-  //   "MY_VAR": "my-variable"
-  // },
+  "vars": {
+    // Public CORS origin — change to your custom domain if you add one
+    "ALLOWED_ORIGIN": "https://webapp-f21.pages.dev",
+    // Cloudflare Turnstile PUBLIC sitekey (safe to commit)
+    // Get yours at dash.cloudflare.com → Turnstile → Add site
+    // Replace "1x00000000000000000000AA" (test key) with your real sitekey
+    "TURNSTILE_SITE_KEY": "0x4AAAAAADhgTP2XYcAbO7b5",
+    // Google OAuth PUBLIC client ID (safe to commit)
+    // Get yours at console.developers.google.com → Credentials → OAuth 2.0 Client IDs
+    "GOOGLE_CLIENT_ID": "912406276350-iue24vppv4l04fpjfbokisvl6g0e4o7t.apps.googleusercontent.com"
+    // SECRETS (add via Cloudflare Pages dashboard → Settings → Environment Variables → Secrets):
+    //   TURNSTILE_SECRET_KEY  — private key for server-side Turnstile verification
+  },
   // "kv_namespaces": [
   //   {
   //     "binding": "MY_KV_NAMESPACE",
