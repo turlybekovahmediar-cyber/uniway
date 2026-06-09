@@ -6,7 +6,7 @@ import { z } from 'zod'
 // =====================================================
 //  UniWay — Backend v2
 //  Storage:  Cloudflare D1 (SQLite)
-//  Auth:     SHA-256 + Bearer token (stored in D1)
+//  Auth:     PBKDF2 (per-user random salt) + Bearer token (stored in D1)
 //  AI:       @cf/meta/llama-3-8b-instruct via c.env.AI
 //  Validation: Zod
 // =====================================================
@@ -15,6 +15,13 @@ import { z } from 'zod'
 type Env = {
   DB: D1Database
   AI: Ai
+  // Set in Cloudflare Pages → Settings → Environment Variables
+  // Public vars (can go in wrangler.jsonc vars):
+  ALLOWED_ORIGIN?: string          // e.g. https://webapp-f21.pages.dev
+  TURNSTILE_SITE_KEY?: string      // public sitekey from dash.cloudflare.com → Turnstile
+  GOOGLE_CLIENT_ID?: string        // public OAuth client ID from console.developers.google.com
+  // Secrets (add via dashboard "Secrets" — NOT in wrangler.jsonc):
+  TURNSTILE_SECRET_KEY?: string    // private secret for server-side verification
 }
 
 // ============================================================
@@ -154,17 +161,19 @@ const RegisterSchema = z.object({
   email: z.string().email('Неверный формат email'),
   password: z.string().min(6, 'Пароль минимум 6 символов'),
   name: z.string().min(1, 'Имя обязательно'),
-  role: z.enum(['student', 'company'], { errorMap: () => ({ message: 'Роль: student или company' }) }),
+  role: z.enum(['student', 'company'], { message: 'Роль: student или company' }),
   direction: z.string().optional(),
   university: z.string().optional(),
   companyName: z.string().optional(),
   industry: z.string().optional(),
   city: z.string().optional(),
+  cfTurnstileToken: z.string().optional(),
 })
 
 const LoginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
+  cfTurnstileToken: z.string().optional(),
 })
 
 const ProfileSchema = z.object({
@@ -183,7 +192,7 @@ const ChangePasswordSchema = z.object({
 })
 
 const SubmissionCreateSchema = z.object({
-  taskId: z.number({ required_error: 'taskId обязателен' }),
+  taskId: z.number({ message: 'taskId обязателен' }),
   taskTitle: z.string().min(1),
   company: z.string().optional(),
   direction: z.string().optional(),
@@ -205,12 +214,40 @@ const InterviewSchema = z.object({
 
 // ---- Crypto helpers ----
 async function hashPassword(password: string): Promise<string> {
-  const encoder = new TextEncoder()
-  const data = encoder.encode(password + 'uniway_salt_2025')
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(hashBuffer))
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('')
+  const salt = new Uint8Array(32)
+  crypto.getRandomValues(salt)
+  const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, '0')).join('')
+  const enc = new TextEncoder()
+  const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits'])
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 },
+    key, 256
+  )
+  const hashHex = Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, '0')).join('')
+  return `pbkdf2:${saltHex}:${hashHex}`
+}
+
+async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
+  if (storedHash.startsWith('pbkdf2:')) {
+    const parts = storedHash.split(':')
+    const saltHex = parts[1]
+    const expectedHex = parts[2]
+    const salt = new Uint8Array(saltHex.match(/.{2}/g)!.map(b => parseInt(b, 16)))
+    const enc = new TextEncoder()
+    const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits'])
+    const bits = await crypto.subtle.deriveBits(
+      { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 },
+      key, 256
+    )
+    const derived = Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, '0')).join('')
+    return derived === expectedHex
+  }
+  // Legacy SHA-256 fallback for existing accounts migrating on next login
+  const enc = new TextEncoder()
+  const data = enc.encode(password + 'uniway_salt_2025')
+  const buf = await crypto.subtle.digest('SHA-256', data)
+  const legacyHash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
+  return legacyHash === storedHash
 }
 
 function generateToken(): string {
@@ -403,6 +440,56 @@ function detectLang(c: any): 'RU' | 'KZ' | 'EN' {
   return 'RU'
 }
 
+// ============================================================
+//  CAPTCHA (Cloudflare Turnstile)
+// ============================================================
+
+/**
+ * Verify a Turnstile token. Returns true when the token is valid OR when
+ * TURNSTILE_SECRET_KEY is not configured (dev/test environments).
+ */
+async function verifyTurnstile(secret: string | undefined, token: string | undefined): Promise<boolean> {
+  if (!secret) return true          // secret not configured → skip (dev/CI)
+  if (!token) return false
+  const body = new URLSearchParams({ secret, response: token })
+  const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+    method: 'POST',
+    body,
+  })
+  const data = await res.json() as { success: boolean }
+  return data.success === true
+}
+
+// ============================================================
+//  GOOGLE OAUTH (One-Tap / Sign-In with Google)
+// ============================================================
+
+interface GoogleTokenPayload {
+  sub: string        // unique Google user ID
+  email: string
+  name: string
+  picture?: string
+  email_verified?: boolean
+}
+
+/**
+ * Verify a Google ID token by calling Google's tokeninfo endpoint.
+ * Only validates audience when GOOGLE_CLIENT_ID is set.
+ * Returns the payload or null on failure.
+ */
+async function verifyGoogleToken(clientId: string | undefined, credential: string): Promise<GoogleTokenPayload | null> {
+  try {
+    const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`)
+    if (!res.ok) return null
+    const payload = await res.json() as GoogleTokenPayload & { aud: string; exp: string }
+    if (clientId && payload.aud !== clientId) return null
+    if (Number(payload.exp) < Date.now() / 1000) return null
+    return payload
+  } catch {
+    return null
+  }
+}
+
 // ---- Middleware: auth guard ----
 async function requireAuth(c: any, db: D1Database): Promise<User | null> {
   const token = getTokenFromRequest(c)
@@ -412,11 +499,36 @@ async function requireAuth(c: any, db: D1Database): Promise<User | null> {
 // ============================================================
 const app = new Hono<{ Bindings: Env; Variables: { ctx: ExecutionContext } }>()
 
-app.use('/api/*', cors({
-  origin: '*',
-  allowHeaders: ['Content-Type', 'Authorization'],
-  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-}))
+// Restrict CORS to our known origin; fall back to Pages default if not set
+app.use('/api/*', async (c, next) => {
+  const origin = c.env?.ALLOWED_ORIGIN || 'https://webapp-f21.pages.dev'
+  return cors({
+    origin,
+    allowHeaders: ['Content-Type', 'Authorization'],
+    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  })(c, next)
+})
+
+// Security headers on every response
+app.use('*', async (c, next) => {
+  await next()
+  c.header('X-Content-Type-Options', 'nosniff')
+  c.header('X-Frame-Options', 'DENY')
+  c.header('Referrer-Policy', 'strict-origin-when-cross-origin')
+  c.header('Permissions-Policy', 'geolocation=(), microphone=(), camera=(), payment=()')
+  c.header(
+    'Content-Security-Policy',
+    [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://challenges.cloudflare.com https://accounts.google.com https://cdnjs.cloudflare.com",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
+      "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com",
+      "img-src 'self' data: https:",
+      "connect-src 'self' https://challenges.cloudflare.com",
+      "frame-src https://challenges.cloudflare.com https://accounts.google.com",
+    ].join('; ')
+  )
+})
 
 // Store ExecutionContext in c.var so any route handler can call waitUntil.
 // Falls back to a no-op stub when running under Vitest (no real Workers runtime).
@@ -427,11 +539,14 @@ app.use('*', async (c, next) => {
     c.set('ctx', ctx)
   } catch {
     // Vitest / non-Workers env: stub so scheduleTask becomes a no-op
-    c.set('ctx', { waitUntil: () => {}, passThroughOnException: () => {} } as ExecutionContext)
+    c.set('ctx', { waitUntil: () => {}, passThroughOnException: () => {}, props: {} } as unknown as ExecutionContext)
   }
   await next()
 })
 
+// Static assets are served by Cloudflare Pages CDN in production;
+// this middleware only handles local wrangler dev requests.
+// @ts-ignore — manifest binding is injected by wrangler at runtime
 app.use('/static/*', serveStatic({ root: './' }))
 
 // ============================================================
@@ -449,9 +564,12 @@ app.post('/api/auth/register', async (c) => {
 
   const parsed = RegisterSchema.safeParse(raw)
   if (!parsed.success) {
-    const msg = parsed.error.errors[0]?.message || 'Ошибка валидации'
+    const msg = parsed.error.issues[0]?.message || 'Ошибка валидации'
     return c.json({ error: msg }, 400)
   }
+
+  const captchaOk = await verifyTurnstile(c.env.TURNSTILE_SECRET_KEY, parsed.data.cfTurnstileToken)
+  if (!captchaOk) return c.json({ error: 'Проверка CAPTCHA не пройдена' }, 400)
 
   const { email, password, name, role, direction, university, companyName, industry, city } = parsed.data
   const normalizedEmail = email.toLowerCase().trim()
@@ -508,6 +626,9 @@ app.post('/api/auth/login', async (c) => {
   const parsed = LoginSchema.safeParse(raw)
   if (!parsed.success) return c.json({ error: 'Введите email и пароль' }, 400)
 
+  const captchaOk = await verifyTurnstile(c.env.TURNSTILE_SECRET_KEY, parsed.data.cfTurnstileToken)
+  if (!captchaOk) return c.json({ error: 'Проверка CAPTCHA не пройдена' }, 400)
+
   const normalizedEmail = parsed.data.email.toLowerCase().trim()
   const user = await db
     .prepare('SELECT * FROM users WHERE email = ?')
@@ -516,8 +637,14 @@ app.post('/api/auth/login', async (c) => {
 
   if (!user) return c.json({ error: 'Пользователь с таким email не найден' }, 401)
 
-  const inputHash = await hashPassword(parsed.data.password)
-  if (inputHash !== user.passwordHash) return c.json({ error: 'Неверный пароль' }, 401)
+  const ok = await verifyPassword(parsed.data.password, user.passwordHash)
+  if (!ok) return c.json({ error: 'Неверный пароль' }, 401)
+
+  // Transparently upgrade legacy SHA-256 hashes to PBKDF2 on successful login
+  if (!user.passwordHash.startsWith('pbkdf2:')) {
+    const newHash = await hashPassword(parsed.data.password)
+    await db.prepare('UPDATE users SET passwordHash=? WHERE id=?').bind(newHash, user.id).run()
+  }
 
   const token = generateToken()
   await db.prepare('INSERT INTO sessions (token, userId, createdAt) VALUES (?,?,?)')
@@ -562,7 +689,7 @@ app.put('/api/auth/profile', async (c) => {
   catch { return c.json({ error: 'Неверный формат данных' }, 400) }
 
   const parsed = ProfileSchema.safeParse(raw)
-  if (!parsed.success) return c.json({ error: parsed.error.errors[0]?.message }, 400)
+  if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message }, 400)
 
   const { name, direction, university, city, companyName, industry, about } = parsed.data
   const newName = name?.trim() || user.name
@@ -603,10 +730,10 @@ app.put('/api/auth/change-password', async (c) => {
   catch { return c.json({ error: 'Неверный формат данных' }, 400) }
 
   const parsed = ChangePasswordSchema.safeParse(raw)
-  if (!parsed.success) return c.json({ error: parsed.error.errors[0]?.message }, 400)
+  if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message }, 400)
 
-  const currentHash = await hashPassword(parsed.data.currentPassword)
-  if (currentHash !== user.passwordHash) return c.json({ error: 'Неверный текущий пароль' }, 401)
+  const ok = await verifyPassword(parsed.data.currentPassword, user.passwordHash)
+  if (!ok) return c.json({ error: 'Неверный текущий пароль' }, 401)
 
   const newHash = await hashPassword(parsed.data.newPassword)
   await db.prepare('UPDATE users SET passwordHash=? WHERE id=?').bind(newHash, user.id).run()
@@ -678,7 +805,7 @@ app.post('/api/submissions', async (c) => {
   catch { return c.json({ error: 'Неверный формат данных' }, 400) }
 
   const parsed = SubmissionCreateSchema.safeParse(raw)
-  if (!parsed.success) return c.json({ error: parsed.error.errors[0]?.message }, 400)
+  if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message }, 400)
 
   const { taskId, taskTitle, company, direction } = parsed.data
 
@@ -726,7 +853,7 @@ app.put('/api/submissions/:id', async (c) => {
   catch { return c.json({ error: 'Неверный формат данных' }, 400) }
 
   const parsed = SubmissionUpdateSchema.safeParse(raw)
-  if (!parsed.success) return c.json({ error: parsed.error.errors[0]?.message }, 400)
+  if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message }, 400)
 
   const body = parsed.data
   let { status, solutionText, score, feedback } = { ...sub, ...body }
@@ -776,7 +903,7 @@ app.post('/api/interview/evaluate', async (c) => {
     totalQuestions: z.number().default(5),
   })
   const parsed = schema.safeParse(raw)
-  if (!parsed.success) return c.json({ error: parsed.error.errors[0]?.message }, 400)
+  if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message }, 400)
 
   const { question, answer, direction, questionIndex, totalQuestions } = parsed.data
   const lang = detectLang(c)
@@ -873,7 +1000,7 @@ app.post('/api/interviews', async (c) => {
   catch { return c.json({ error: 'Неверный формат данных' }, 400) }
 
   const parsed = InterviewSchema.safeParse(raw)
-  if (!parsed.success) return c.json({ error: parsed.error.errors[0]?.message }, 400)
+  if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message }, 400)
 
   const { direction, score, questionsCount, feedback } = parsed.data
   const id = generateId()
@@ -1009,6 +1136,56 @@ app.get('/api/users/stats', async (c) => {
 
   scheduleTask(c.get('ctx'), () => cacheSet(key, payload, CACHE_TTL.adminStats))
   return c.json(payload)
+})
+
+// ============================================================
+//  GOOGLE OAUTH ROUTE
+// ============================================================
+
+// POST /api/auth/google
+// Body: { credential: string }  — the Google ID token from GIS / One-Tap
+app.post('/api/auth/google', async (c) => {
+  const db = c.env.DB
+  await seedAdmin(db)
+
+  let raw: unknown
+  try { raw = await c.req.json() }
+  catch { return c.json({ error: 'Неверный формат данных' }, 400) }
+
+  const schema = z.object({ credential: z.string().min(1) })
+  const parsed = schema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: 'Google credential обязателен' }, 400)
+
+  const payload = await verifyGoogleToken(c.env.GOOGLE_CLIENT_ID, parsed.data.credential)
+  if (!payload) return c.json({ error: 'Недействительный Google токен' }, 401)
+  if (!payload.email_verified) return c.json({ error: 'Email в Google аккаунте не подтверждён' }, 400)
+
+  const normalizedEmail = payload.email.toLowerCase().trim()
+  let user = await db.prepare('SELECT * FROM users WHERE email = ?').bind(normalizedEmail).first<User>()
+
+  if (!user) {
+    // Auto-register: Google users become students by default
+    const id = generateId()
+    const avatar = getAvatarInitials(payload.name || payload.email)
+    const createdAt = new Date().toISOString()
+    await db.prepare(`
+      INSERT INTO users (id,email,passwordHash,role,name,direction,avatar,createdAt)
+      VALUES (?,?,?,?,?,?,?,?)
+    `).bind(id, normalizedEmail, '', 'student', payload.name || normalizedEmail, 'IT', avatar, createdAt).run()
+    user = await db.prepare('SELECT * FROM users WHERE id = ?').bind(id).first<User>()
+  }
+
+  const token = generateToken()
+  await db.prepare('INSERT INTO sessions (token, userId, createdAt) VALUES (?,?,?)')
+    .bind(token, user!.id, new Date().toISOString())
+    .run()
+
+  return c.json({
+    success: true,
+    token,
+    user: safeUser(user!),
+    message: `Добро пожаловать, ${user!.name}!`,
+  })
 })
 
 // ============================================================
@@ -1160,7 +1337,10 @@ app.get('/api/docs', (c) => {
 // ============================================================
 //  HTML SHELL (SPA)
 // ============================================================
-function getHTML(): string {
+function getHTML(env?: Env): string {
+  // Cloudflare Turnstile test sitekey (always passes) — replace with real key in production
+  const turnstileSiteKey = env?.TURNSTILE_SITE_KEY || '1x00000000000000000000AA'
+  const googleClientId   = env?.GOOGLE_CLIENT_ID   || ''
   return `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -1187,6 +1367,14 @@ function getHTML(): string {
   </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <!-- Cloudflare Turnstile CAPTCHA -->
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+  <!-- Google Identity Services (Sign-In with Google) -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script>
+    window.TURNSTILE_SITE_KEY = '${turnstileSiteKey}';
+    window.GOOGLE_CLIENT_ID   = '${googleClientId}';
+  </script>
 </head>
 <body class="font-sans bg-gray-50 text-gray-900">
   <div id="app"></div>
@@ -1199,7 +1387,7 @@ const SPA_ROUTES = ['/', '/about', '/register', '/login', '/catalog',
   '/task/*', '/student/*', '/company/*', '/interview', '/resume', '/admin', '/*']
 
 for (const route of SPA_ROUTES) {
-  app.get(route, (c) => c.html(getHTML()))
+  app.get(route, (c) => c.html(getHTML(c.env)))
 }
 
 export default app

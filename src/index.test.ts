@@ -39,12 +39,18 @@ function makeEnv(overrides: Partial<{
   }
 }
 
-/** Хэш для пароля "correct_password" с солью 'uniway_salt_2025' */
+/** PBKDF2-хэш для пароля "correct_password" с фиксированной солью (для воспроизводимости тестов) */
 const CORRECT_HASH = await (async () => {
-  const encoder = new TextEncoder()
-  const data = encoder.encode('correct_password' + 'uniway_salt_2025')
-  const buf = await crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
+  const salt = new Uint8Array(32).fill(0xab)
+  const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, '0')).join('')
+  const enc = new TextEncoder()
+  const key = await crypto.subtle.importKey('raw', enc.encode('correct_password'), 'PBKDF2', false, ['deriveBits'])
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 },
+    key, 256
+  )
+  const hashHex = Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, '0')).join('')
+  return `pbkdf2:${saltHex}:${hashHex}`
 })()
 
 /** Типичный пользователь-студент из базы */
@@ -103,7 +109,17 @@ function makeAuthEnv(user: typeof MOCK_STUDENT, extraFirst?: () => Promise<unkno
 
 describe('POST /api/auth/register', () => {
   it('201: создаёт нового студента', async () => {
-    const env = makeEnv({ dbFirst: async () => null })
+    // call 1: seedAdmin check (null = no admin yet)
+    // call 2: email duplicate check (null = not duplicate)
+    // call 3+: SELECT after INSERT — return mock user
+    let calls = 0
+    const env = makeEnv({
+      dbFirst: async () => {
+        calls++
+        if (calls <= 2) return null
+        return { ...MOCK_STUDENT, id: 'new-id', email: 'new@uniway.kz' }
+      },
+    })
 
     const res = await app.request('/api/auth/register', {
       method: 'POST',
@@ -671,8 +687,8 @@ describe('GET /api/users/list', () => {
 
 describe('GET /api/users/stats', () => {
   it('200: админ видит статистику платформы', async () => {
-    const env = makeAuthEnv(MOCK_ADMIN)
-    env.DB.first = async () => ({ n: 42 })
+    // extraFirst handles all COUNT(*) queries after the auth lookup (calls 3+)
+    const env = makeAuthEnv(MOCK_ADMIN, async () => ({ n: 42 }))
 
     const res = await app.request('/api/users/stats', {
       headers: { Authorization: 'Bearer token' },
