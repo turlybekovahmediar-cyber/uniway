@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS users (
   city TEXT,
   about TEXT,
   avatar TEXT,
+  isPremium INTEGER NOT NULL DEFAULT 0,
+  premiumSince TEXT,
   createdAt TEXT NOT NULL
 );
 
@@ -59,3 +61,20 @@ CREATE TABLE IF NOT EXISTS interview_results (
 
 -- Индекс для быстрого получения собеседований пользователя
 CREATE INDEX IF NOT EXISTS idx_interview_results_userId ON interview_results(userId);
+
+-- Таблица платежей (PayPal) — лог транзакций UniWay Pro
+CREATE TABLE IF NOT EXISTS payments (
+  id         TEXT PRIMARY KEY,
+  userId     TEXT NOT NULL,
+  orderId    TEXT NOT NULL,
+  amount     REAL NOT NULL,
+  currency   TEXT NOT NULL DEFAULT 'USD',
+  status     TEXT NOT NULL,
+  provider   TEXT NOT NULL DEFAULT 'paypal',
+  createdAt  TEXT NOT NULL,
+  FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Уникальность orderId — защита от двойного зачисления премиума
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_orderId ON payments(orderId);
+CREATE INDEX IF NOT EXISTS idx_payments_userId ON payments(userId);

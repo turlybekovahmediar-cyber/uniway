@@ -20,9 +20,17 @@ type Env = {
   ALLOWED_ORIGIN?: string          // e.g. https://webapp-f21.pages.dev
   TURNSTILE_SITE_KEY?: string      // public sitekey from dash.cloudflare.com → Turnstile
   GOOGLE_CLIENT_ID?: string        // public OAuth client ID from console.developers.google.com
+  PAYPAL_CLIENT_ID?: string        // public PayPal client ID (used by frontend SDK + backend auth)
+  PAYPAL_MODE?: string             // 'sandbox' (default) | 'live'
   // Secrets (add via dashboard "Secrets" — NOT in wrangler.jsonc):
   TURNSTILE_SECRET_KEY?: string    // private secret for server-side verification
+  PAYPAL_CLIENT_SECRET?: string    // private PayPal secret for server-side order/capture
 }
+
+// ---- Pricing / plans ----
+const PRO_PRICE = '29.99'          // UniWay Pro — one-time payment, USD
+const PRO_CURRENCY = 'USD'
+const FREE_INTERVIEWS_PER_WEEK = 1 // free tier: 1 AI-interview simulation per week
 
 // ============================================================
 //  CACHE HELPERS  (Cloudflare Cache API)
@@ -129,6 +137,8 @@ interface User {
   city?: string
   about?: string
   avatar: string
+  isPremium?: number      // 0 | 1 — UniWay Pro flag
+  premiumSince?: string
   createdAt: string
 }
 
@@ -490,6 +500,71 @@ async function verifyGoogleToken(clientId: string | undefined, credential: strin
   }
 }
 
+// ============================================================
+//  FREEMIUM / BILLING (UniWay Pro + PayPal)
+// ============================================================
+
+/** True when the user has an active UniWay Pro subscription. */
+function isPro(user: User | null | undefined): boolean {
+  return !!user && Number(user.isPremium) === 1
+}
+
+/** Count how many interview simulations a user completed in the last 7 days. */
+async function weeklyInterviewCount(db: D1Database, userId: string): Promise<number> {
+  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+  const row = await db
+    .prepare('SELECT COUNT(*) AS n FROM interview_results WHERE userId = ? AND date >= ?')
+    .bind(userId, since)
+    .first<{ n: number }>()
+  return Number(row?.n ?? 0)
+}
+
+/**
+ * Strip the detailed AI mentor feedback for free-tier users.
+ * Free students see the score only; Pro students get the full line-by-line breakdown.
+ */
+function gateSubmissionFeedback<T extends { feedback?: string; status?: string }>(
+  user: User,
+  sub: T
+): T & { feedbackLocked?: boolean } {
+  if (isPro(user) || sub.status !== 'evaluated' || !sub.feedback) return sub
+  return {
+    ...sub,
+    feedback: 'Доступен только балл. Полный разбор ошибок (AI Mentor) — в тарифе UniWay Pro.',
+    feedbackLocked: true,
+  }
+}
+
+/** Base URL for PayPal REST API depending on mode. */
+function paypalBase(mode: string | undefined): string {
+  return mode === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com'
+}
+
+/** Obtain a PayPal OAuth2 access token via client-credentials. Returns null on failure. */
+async function getPayPalAccessToken(env: Env): Promise<string | null> {
+  if (!env.PAYPAL_CLIENT_ID || !env.PAYPAL_CLIENT_SECRET) return null
+  const basic = btoa(`${env.PAYPAL_CLIENT_ID}:${env.PAYPAL_CLIENT_SECRET}`)
+  try {
+    const res = await fetch(`${paypalBase(env.PAYPAL_MODE)}/v1/oauth2/token`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${basic}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'grant_type=client_credentials',
+    })
+    if (!res.ok) return null
+    const data = await res.json() as { access_token?: string }
+    return data.access_token ?? null
+  } catch {
+    return null
+  }
+}
+
+const CaptureOrderSchema = z.object({
+  orderId: z.string().min(1, 'orderId обязателен'),
+})
+
 // ---- Middleware: auth guard ----
 async function requireAuth(c: any, db: D1Database): Promise<User | null> {
   const token = getTokenFromRequest(c)
@@ -520,12 +595,12 @@ app.use('*', async (c, next) => {
     'Content-Security-Policy',
     [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://challenges.cloudflare.com https://accounts.google.com https://cdnjs.cloudflare.com",
+      "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://challenges.cloudflare.com https://accounts.google.com https://cdnjs.cloudflare.com https://www.paypal.com https://www.paypalobjects.com",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
       "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com",
       "img-src 'self' data: https:",
-      "connect-src 'self' https://challenges.cloudflare.com",
-      "frame-src https://challenges.cloudflare.com https://accounts.google.com",
+      "connect-src 'self' https://challenges.cloudflare.com https://www.paypal.com https://www.sandbox.paypal.com",
+      "frame-src https://challenges.cloudflare.com https://accounts.google.com https://www.paypal.com https://www.sandbox.paypal.com",
     ].join('; ')
   )
 })
@@ -790,7 +865,9 @@ app.get('/api/submissions', async (c) => {
     .bind(user.id)
     .all<Submission>()
 
-  return c.json({ submissions: results, total: results.length })
+  // Free tier sees scores only — detailed AI feedback is gated behind Pro
+  const gated = results.map(s => gateSubmissionFeedback(user, s))
+  return c.json({ submissions: gated, total: gated.length })
 })
 
 // POST /api/submissions  — take a task
@@ -879,7 +956,8 @@ app.put('/api/submissions/:id', async (c) => {
   // Background: invalidate caches that include this user's stats/scores
   scheduleTask(c.get('ctx'), () => bgInvalidateUserCaches(user.id))
 
-  return c.json({ success: true, submission: updated })
+  // Free tier sees score only; Pro gets the full AI-mentor breakdown
+  return c.json({ success: true, submission: gateSubmissionFeedback(user, updated!) })
 })
 
 // ============================================================
@@ -906,6 +984,19 @@ app.post('/api/interview/evaluate', async (c) => {
   if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message }, 400)
 
   const { question, answer, direction, questionIndex, totalQuestions } = parsed.data
+
+  // Freemium gate: free students get FREE_INTERVIEWS_PER_WEEK simulations/week.
+  // Enforced on the first question (start of a simulation); Pro is unlimited.
+  if (questionIndex === 0 && !isPro(user)) {
+    const used = await weeklyInterviewCount(db, user.id)
+    if (used >= FREE_INTERVIEWS_PER_WEEK) {
+      return c.json({
+        error: `Лимит бесплатных собеседований исчерпан (${FREE_INTERVIEWS_PER_WEEK} в неделю). Перейдите на UniWay Pro для безлимита.`,
+        upgrade: true,
+      }, 403)
+    }
+  }
+
   const lang = detectLang(c)
 
   const langInstr: Record<string, string> = {
@@ -971,6 +1062,25 @@ ${langInstr[lang]}`
   }
 })
 
+// GET /api/interview/quota — remaining free interview simulations this week
+app.get('/api/interview/quota', async (c) => {
+  const db = c.env.DB
+  const user = await requireAuth(c, db)
+  if (!user) return c.json({ error: 'Не авторизован' }, 401)
+
+  if (isPro(user)) {
+    return c.json({ isPremium: true, allowed: true, limit: null, used: 0, remaining: null })
+  }
+  const used = await weeklyInterviewCount(db, user.id)
+  return c.json({
+    isPremium: false,
+    allowed: used < FREE_INTERVIEWS_PER_WEEK,
+    limit: FREE_INTERVIEWS_PER_WEEK,
+    used,
+    remaining: Math.max(0, FREE_INTERVIEWS_PER_WEEK - used),
+  })
+})
+
 // ============================================================
 //  INTERVIEW RESULTS
 // ============================================================
@@ -1017,6 +1127,123 @@ app.post('/api/interviews', async (c) => {
   scheduleTask(c.get('ctx'), () => bgInvalidateUserCaches(user.id))
 
   return c.json({ success: true, interview: result }, 201)
+})
+
+// ============================================================
+//  PAYMENTS (PayPal — UniWay Pro, one-time $29.99)
+// ============================================================
+
+// POST /api/payment/paypal/create-order — create a PayPal order, return its id
+app.post('/api/payment/paypal/create-order', async (c) => {
+  const db = c.env.DB
+  const user = await requireAuth(c, db)
+  if (!user) return c.json({ error: 'Не авторизован' }, 401)
+  if (isPro(user)) return c.json({ error: 'У вас уже активен UniWay Pro' }, 409)
+
+  const accessToken = await getPayPalAccessToken(c.env)
+  if (!accessToken) return c.json({ error: 'Платежи временно недоступны' }, 503)
+
+  try {
+    const res = await fetch(`${paypalBase(c.env.PAYPAL_MODE)}/v2/checkout/orders`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        intent: 'CAPTURE',
+        purchase_units: [{
+          // custom_id binds the order to this user — re-verified at capture time
+          custom_id: user.id,
+          description: 'UniWay Pro — полный доступ',
+          amount: { currency_code: PRO_CURRENCY, value: PRO_PRICE },
+        }],
+        application_context: {
+          brand_name: 'UniWay',
+          user_action: 'PAY_NOW',
+          shipping_preference: 'NO_SHIPPING',
+        },
+      }),
+    })
+    const data = await res.json() as { id?: string; status?: string }
+    if (!res.ok || !data.id) return c.json({ error: 'Не удалось создать заказ PayPal' }, 502)
+    return c.json({ orderId: data.id, status: data.status }, 201)
+  } catch {
+    return c.json({ error: 'Ошибка связи с PayPal' }, 502)
+  }
+})
+
+// POST /api/payment/paypal/capture-order — capture payment, grant Pro on success
+app.post('/api/payment/paypal/capture-order', async (c) => {
+  const db = c.env.DB
+  const user = await requireAuth(c, db)
+  if (!user) return c.json({ error: 'Не авторизован' }, 401)
+
+  let raw: unknown
+  try { raw = await c.req.json() }
+  catch { return c.json({ error: 'Неверный формат данных' }, 400) }
+
+  const parsed = CaptureOrderSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message }, 400)
+  const { orderId } = parsed.data
+
+  // Idempotency: if this order was already captured, don't double-grant
+  const existingPayment = await db
+    .prepare('SELECT id FROM payments WHERE orderId = ?')
+    .bind(orderId)
+    .first()
+  if (existingPayment) return c.json({ success: true, isPremium: true, alreadyProcessed: true })
+
+  const accessToken = await getPayPalAccessToken(c.env)
+  if (!accessToken) return c.json({ error: 'Платежи временно недоступны' }, 503)
+
+  try {
+    const res = await fetch(`${paypalBase(c.env.PAYPAL_MODE)}/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+    })
+    const data = await res.json() as {
+      status?: string
+      purchase_units?: Array<{
+        custom_id?: string
+        payments?: { captures?: Array<{ amount?: { value?: string; currency_code?: string } }> }
+      }>
+    }
+
+    if (!res.ok || data.status !== 'COMPLETED') {
+      return c.json({ error: 'Платёж не завершён', status: data.status ?? 'UNKNOWN' }, 402)
+    }
+
+    // Server-side validation: the order must belong to this user and match the price
+    const unit = data.purchase_units?.[0]
+    const capture = unit?.payments?.captures?.[0]
+    const paidValue = capture?.amount?.value
+    const paidCurrency = capture?.amount?.currency_code
+    if (unit?.custom_id && unit.custom_id !== user.id) {
+      return c.json({ error: 'Заказ принадлежит другому пользователю' }, 403)
+    }
+    if (paidValue !== PRO_PRICE || paidCurrency !== PRO_CURRENCY) {
+      return c.json({ error: 'Сумма платежа не совпадает' }, 402)
+    }
+
+    const now = new Date().toISOString()
+
+    // Grant Pro + log the transaction
+    await db.prepare('UPDATE users SET isPremium = 1, premiumSince = ? WHERE id = ?')
+      .bind(now, user.id).run()
+    await db.prepare(`
+      INSERT INTO payments (id, userId, orderId, amount, currency, status, provider, createdAt)
+      VALUES (?,?,?,?,?,?,?,?)
+    `).bind(generateId(), user.id, orderId, Number(paidValue), paidCurrency, 'COMPLETED', 'paypal', now).run()
+
+    const updated = await db.prepare('SELECT * FROM users WHERE id = ?').bind(user.id).first<User>()
+    return c.json({ success: true, isPremium: true, user: updated ? safeUser(updated) : undefined })
+  } catch {
+    return c.json({ error: 'Ошибка связи с PayPal' }, 502)
+  }
 })
 
 // ============================================================
@@ -1078,16 +1305,17 @@ app.get('/api/company/candidates', async (c) => {
   const cached = await cacheGet<object>(key)
   if (cached) return c.json(cached)
 
-  // Return students with their avg scores
+  // Return students with their avg scores.
+  // Priority Apply: Pro candidates surface first (isPremium DESC), then by score.
   const { results } = await db
     .prepare(`
-      SELECT u.id, u.name, u.direction, u.university, u.city, u.avatar,
+      SELECT u.id, u.name, u.direction, u.university, u.city, u.avatar, u.isPremium,
              AVG(s.score) as avgScore, COUNT(s.id) as completedTasks
       FROM users u
       LEFT JOIN submissions s ON u.id = s.userId AND s.status='evaluated'
       WHERE u.role='student'
       GROUP BY u.id
-      ORDER BY avgScore DESC
+      ORDER BY u.isPremium DESC, avgScore DESC
     `)
     .all()
 
@@ -1341,6 +1569,8 @@ function getHTML(env?: Env): string {
   // Cloudflare Turnstile test sitekey (always passes) — replace with real key in production
   const turnstileSiteKey = env?.TURNSTILE_SITE_KEY || '1x00000000000000000000AA'
   const googleClientId   = env?.GOOGLE_CLIENT_ID   || ''
+  const paypalClientId   = env?.PAYPAL_CLIENT_ID   || ''
+  const paypalCurrency   = 'USD'
   return `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -1375,7 +1605,9 @@ function getHTML(env?: Env): string {
   <script>
     window.TURNSTILE_SITE_KEY = '${turnstileSiteKey}';
     window.GOOGLE_CLIENT_ID   = '${googleClientId}';
-  </script>
+    window.PAYPAL_CLIENT_ID   = '${paypalClientId}';
+    window.PAYPAL_CURRENCY    = '${paypalCurrency}';
+</script>
 </head>
 <body class="font-sans bg-gray-50 text-gray-900">
   <div id="app"></div>
@@ -1384,7 +1616,7 @@ function getHTML(env?: Env): string {
 </html>`
 }
 
-const SPA_ROUTES = ['/', '/about', '/register', '/login', '/catalog',
+const SPA_ROUTES = ['/', '/about', '/register', '/login', '/catalog', '/premium',
   '/task/*', '/student/*', '/company/*', '/interview', '/resume', '/admin', '/*']
 
 for (const route of SPA_ROUTES) {
