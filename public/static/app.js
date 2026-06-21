@@ -315,7 +315,7 @@ function getPageUrl(page, params = {}) {
     company_dashboard: '/company/dashboard', company_tasks: '/company/tasks',
     company_candidates: '/company/candidates', company_profile: '/company/profile',
     admin: '/admin', about: '/about', task_detail: `/task/${params.id || ''}`,
-    interview: '/interview',
+    interview: '/interview', premium: '/premium',
   };
   return urls[page] || '/';
 }
@@ -329,6 +329,9 @@ function renderApp() {
   updateNavbar();
   if (State.currentPage === 'login' || State.currentPage === 'register') {
     initGoogleButton();
+  }
+  if (State.currentPage === 'premium') {
+    initPayPalButtons();
   }
 }
 
@@ -356,6 +359,11 @@ function renderNavbar() {
           ${isLoggedIn ? `
             <button onclick="navigate('${role === 'company' ? 'company_dashboard' : 'student_dashboard'}')" class="nav-link ${State.currentPage.includes('dashboard') ? 'active' : ''}">${t('nav_dashboard')}</button>
           ` : ''}
+          ${role !== 'company' ? (isPremiumUser() ? `
+            <span class="nav-link flex items-center gap-1 text-accent-600 font-semibold cursor-default"><i class="fas fa-crown text-xs"></i> Pro</span>
+          ` : `
+            <button onclick="navigate('premium')" class="nav-link flex items-center gap-1 ${State.currentPage === 'premium' ? 'active' : ''}"><i class="fas fa-crown text-xs text-yellow-500"></i> Pro</button>
+          `) : ''}
         </div>
 
         <!-- Right Side -->
@@ -430,6 +438,7 @@ function renderCurrentPage() {
     admin: renderAdminPanel,
     task_detail: renderTaskDetail,
     interview: renderInterviewPage,
+    premium: renderPremiumPage,
   };
   const render = pages[State.currentPage];
   return render ? render() : renderHomePage();
@@ -1361,6 +1370,7 @@ function renderStudentSidebar(active) {
           <div class="font-bold text-gray-900 text-sm">${State.currentUser?.name || 'Student'}</div>
           <div class="text-xs text-gray-500 mt-0.5">${State.currentUser?.direction || 'IT'}</div>
           ${avgScore ? `<div class="badge badge-green mt-2 text-xs">⭐ ${avgScore} балл</div>` : '<div class="badge badge-blue mt-2 text-xs">Студент</div>'}
+          ${isPremiumUser() ? `<div class="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-accent-600"><i class="fas fa-crown text-yellow-500"></i> UniWay Pro</div>` : ''}
         </div>
         
         <nav class="space-y-1">
@@ -1373,6 +1383,12 @@ function renderStudentSidebar(active) {
         </nav>
 
         <div class="mt-4 pt-4 border-t border-gray-100">
+          ${!isPremiumUser() ? `
+            <button onclick="navigate('premium')" class="sidebar-nav-link w-full text-primary-600 hover:bg-primary-50">
+              <span class="icon"><i class="fas fa-crown text-yellow-500"></i></span>
+              <span>Перейти на Pro</span>
+            </button>
+          ` : ''}
           <button onclick="navigate('catalog')" class="sidebar-nav-link w-full">
             <span class="icon"><i class="fas fa-search"></i></span>
             <span>Найти задание</span>
@@ -1534,9 +1550,15 @@ function renderInterviewSetup() {
           `).join('')}
         </div>
 
-        <button onclick="startInterview()" class="btn btn-primary w-full btn-xl">
+        <button id="start-interview-btn" onclick="startInterview()" class="btn btn-primary w-full btn-xl">
           <i class="fas fa-play"></i> Начать AI-собеседование
         </button>
+        ${!isPremiumUser() ? `
+          <p class="text-center text-xs text-gray-400 mt-3">
+            Бесплатно — 1 собеседование в неделю.
+            <button onclick="navigate('premium')" class="text-primary-600 font-medium hover:underline">Безлимит с Pro <i class="fas fa-crown text-yellow-500"></i></button>
+          </p>
+        ` : ''}
       </div>
     </div>
 
@@ -2756,6 +2778,29 @@ function showNotification(text, type = 'success') {
   setTimeout(() => { notif.style.opacity = '0'; notif.style.transform = 'translateX(100%)'; notif.style.transition = 'all 0.3s'; setTimeout(() => notif.remove(), 300); }, 3000);
 }
 
+/** Modal nudging the user to upgrade to UniWay Pro. */
+function showUpgradePrompt(message) {
+  const existing = document.getElementById('upgrade-modal');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'upgrade-modal';
+  modal.className = 'fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50';
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 text-center">
+      <div class="w-14 h-14 rounded-full bg-primary-50 flex items-center justify-center mx-auto mb-4">
+        <i class="fas fa-crown text-2xl text-yellow-500"></i>
+      </div>
+      <h3 class="text-lg font-black text-gray-900 mb-1">Перейди на UniWay Pro</h3>
+      <p class="text-sm text-gray-500 mb-5">${message || 'Эта возможность доступна в тарифе UniWay Pro.'}</p>
+      <button onclick="document.getElementById('upgrade-modal').remove(); navigate('premium')" class="btn btn-primary w-full mb-2">
+        Смотреть тариф Pro — $29.99
+      </button>
+      <button onclick="document.getElementById('upgrade-modal').remove()" class="btn btn-ghost w-full text-gray-500">Позже</button>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
 // ===== AUTH SYSTEM =====
 // Uses real backend API + localStorage for token persistence
 
@@ -3083,8 +3128,24 @@ function filterCatalog() {
 }
 
 // ===== AI INTERVIEW =====
-function startInterview() {
+async function startInterview() {
   const dir = document.getElementById('interview-dir')?.value || 'IT';
+
+  // Freemium gate: free students get 1 simulation/week. Check before starting.
+  if (!isPremiumUser()) {
+    const startBtn = document.getElementById('start-interview-btn');
+    if (startBtn) { startBtn.disabled = true; startBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Проверяем...'; }
+    try {
+      const { ok, data } = await AUTH.apiCall('/api/interview/quota');
+      if (ok && data.allowed === false) {
+        showUpgradePrompt('Бесплатный лимит — 1 собеседование в неделю. Перейди на UniWay Pro для безлимита.');
+        if (startBtn) { startBtn.disabled = false; startBtn.innerHTML = '<i class="fas fa-play"></i> Начать AI-собеседование'; }
+        return;
+      }
+    } catch { /* network issue — let them try; server enforces the limit anyway */ }
+    if (startBtn) { startBtn.disabled = false; startBtn.innerHTML = '<i class="fas fa-play"></i> Начать AI-собеседование'; }
+  }
+
   State.interviewStarted = true;
   State.interviewDir = dir;
   State.interviewQ = 0;
@@ -3125,6 +3186,16 @@ async function sendAnswer() {
       questionIndex: State.interviewQ,
       totalQuestions: questions.length,
     });
+
+    // Freemium limit reached (server-enforced) — stop and offer upgrade
+    if (res.status === 403 && res.data?.upgrade) {
+      State.interviewTyping = false;
+      State.interviewStarted = false;
+      State.interviewMessages = [];
+      renderApp();
+      showUpgradePrompt(res.data.error);
+      return;
+    }
 
     let score, feedback;
     if (res.ok && res.data && res.data.score !== undefined) {
@@ -3305,13 +3376,19 @@ async function submitSolution() {
     });
 
     if (updateRes.ok) {
-      const score = updateRes.data.submission.score || 0;
-      const feedback = updateRes.data.submission.feedback || '';
+      const sub = updateRes.data.submission;
+      const score = sub.score || 0;
+      const feedback = sub.feedback || '';
       // Update cached submissions
       State.userSubmissions = State.userSubmissions.filter(s => s.taskId !== task.id);
-      State.userSubmissions.push(updateRes.data.submission);
+      State.userSubmissions.push(sub);
       showNotification(`Решение отправлено! AI-оценка: ${score}/100`, 'success');
-      setTimeout(() => showNotification(feedback.substring(0, 80) + '...', 'info'), 2000);
+      if (sub.feedbackLocked) {
+        // Free tier: score only — nudge toward Pro for the full breakdown
+        setTimeout(() => showUpgradePrompt('Полный разбор ошибок (AI Mentor) доступен в UniWay Pro.'), 1500);
+      } else if (feedback) {
+        setTimeout(() => showNotification(feedback.substring(0, 80) + '...', 'info'), 2000);
+      }
     } else {
       showNotification(updateRes.data?.error || 'Ошибка отправки', 'error');
     }
@@ -3479,12 +3556,204 @@ function attachEventListeners() {
   }
 }
 
+// ===== PREMIUM / UNIWAY PRO =====
+
+/** True when the logged-in user has an active Pro subscription. */
+function isPremiumUser() {
+  return Number(State.currentUser?.isPremium) === 1;
+}
+
+const PRO_FEATURES = [
+  { icon: 'fa-infinity',     title: 'Безлимитные AI-собеседования', desc: 'Тренируйся столько, сколько нужно — без лимита в неделю' },
+  { icon: 'fa-magnifying-glass-chart', title: 'Глубокий разбор (AI Mentor)', desc: 'Построчный анализ кода и ответов, а не только балл' },
+  { icon: 'fa-bolt',         title: 'Priority Apply', desc: 'Твой профиль показывается компаниям первым' },
+  { icon: 'fa-headset',      title: 'Приоритетная поддержка', desc: 'Ответы на вопросы вне очереди' },
+];
+
+const FREE_FEATURES = [
+  { ok: true,  text: '1 AI-собеседование в неделю' },
+  { ok: true,  text: 'Базовый фидбэк по задачам (только балл)' },
+  { ok: true,  text: 'Доступ к стандартному каталогу заданий' },
+  { ok: false, text: 'Глубокий разбор ошибок (AI Mentor)' },
+  { ok: false, text: 'Priority Apply на стажировки' },
+];
+
+function renderPremiumPage() {
+  const loggedIn = !!State.currentUser;
+  const isPro = isPremiumUser();
+
+  return `
+  <main class="pt-16 min-h-screen bg-gray-50">
+    <!-- Hero -->
+    <section class="bg-gradient-to-br from-primary-700 via-primary-600 to-primary-800 text-white">
+      <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-16 text-center">
+        <span class="inline-flex items-center gap-2 bg-white/15 backdrop-blur px-4 py-1.5 rounded-full text-sm font-medium mb-5">
+          <i class="fas fa-crown text-yellow-300"></i> UniWay Pro
+        </span>
+        <h1 class="text-3xl sm:text-4xl md:text-5xl font-black leading-tight mb-4">
+          Получи оффер на стажировку<br class="hidden sm:block"> в 2 раза быстрее с UniWay Pro
+        </h1>
+        <p class="text-primary-100 text-lg max-w-2xl mx-auto">
+          Безлимитные AI-собеседования, построчный разбор от AI-ментора и приоритет перед работодателями.
+        </p>
+      </div>
+    </section>
+
+    <!-- Plans -->
+    <section class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 -mt-10 pb-16">
+      <div class="grid md:grid-cols-2 gap-6">
+
+        <!-- Free plan -->
+        <div class="bg-white rounded-2xl border border-gray-200 shadow-sm p-8 flex flex-col">
+          <div class="text-sm font-semibold text-gray-500 uppercase tracking-wide">Базовый</div>
+          <div class="mt-3 flex items-baseline gap-1">
+            <span class="text-4xl font-black text-gray-900">$0</span>
+            <span class="text-gray-400">/ навсегда</span>
+          </div>
+          <p class="text-gray-500 text-sm mt-2">Чтобы начать и попробовать платформу</p>
+          <ul class="mt-6 space-y-3 flex-1">
+            ${FREE_FEATURES.map(f => `
+              <li class="flex items-start gap-3 text-sm ${f.ok ? 'text-gray-700' : 'text-gray-400'}">
+                <i class="fas ${f.ok ? 'fa-check text-accent-500' : 'fa-xmark text-gray-300'} mt-0.5"></i>
+                <span>${f.text}</span>
+              </li>
+            `).join('')}
+          </ul>
+          <button onclick="navigate('${loggedIn ? 'student_dashboard' : 'register'}')" class="btn btn-ghost w-full mt-8 border border-gray-200">
+            ${loggedIn ? 'Текущий план' : 'Начать бесплатно'}
+          </button>
+        </div>
+
+        <!-- Pro plan -->
+        <div class="relative bg-white rounded-2xl border-2 border-primary-600 shadow-lg p-8 flex flex-col">
+          <span class="absolute -top-3 left-1/2 -translate-x-1/2 bg-primary-600 text-white text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wide">
+            Рекомендуем
+          </span>
+          <div class="text-sm font-semibold text-primary-600 uppercase tracking-wide flex items-center gap-2">
+            <i class="fas fa-crown text-yellow-500"></i> UniWay Pro
+          </div>
+          <div class="mt-3 flex items-baseline gap-1">
+            <span class="text-4xl font-black text-gray-900">$29.99</span>
+            <span class="text-gray-400">/ разово</span>
+          </div>
+          <p class="text-gray-500 text-sm mt-2">Полный доступ ко всем возможностям</p>
+          <ul class="mt-6 space-y-3 flex-1">
+            ${PRO_FEATURES.map(f => `
+              <li class="flex items-start gap-3 text-sm text-gray-700">
+                <i class="fas ${f.icon} text-accent-500 mt-0.5 w-4 text-center"></i>
+                <span><strong class="text-gray-900">${f.title}.</strong> ${f.desc}</span>
+              </li>
+            `).join('')}
+          </ul>
+
+          <!-- Checkout area -->
+          <div class="mt-8">
+            ${isPro ? `
+              <div class="bg-accent-50 border border-accent-100 rounded-xl p-4 text-center">
+                <i class="fas fa-circle-check text-accent-500 text-2xl mb-1"></i>
+                <div class="font-bold text-gray-900">UniWay Pro активен</div>
+                <div class="text-sm text-gray-500">Спасибо за поддержку! Все функции разблокированы.</div>
+              </div>
+            ` : !loggedIn ? `
+              <button onclick="navigate('login')" class="btn btn-primary w-full">
+                <i class="fas fa-lock"></i> Войдите, чтобы оформить Pro
+              </button>
+            ` : `
+              <div id="paypal-button-container"></div>
+              <div id="paypal-fallback" class="hidden text-center text-sm text-gray-400 mt-2"></div>
+              <p class="text-xs text-gray-400 text-center mt-3">
+                <i class="fas fa-shield-halved"></i> Безопасная оплата через PayPal. Карты Visa/Mastercard поддерживаются.
+              </p>
+            `}
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>`;
+}
+
+/** Lazy-load the PayPal JS SDK once. Resolves with window.paypal or rejects. */
+function loadPayPalSdk() {
+  return new Promise((resolve, reject) => {
+    if (window.paypal) return resolve(window.paypal);
+    const clientId = window.PAYPAL_CLIENT_ID;
+    if (!clientId) return reject(new Error('no-client-id'));
+    const existing = document.getElementById('paypal-sdk');
+    if (existing) {
+      existing.addEventListener('load', () => resolve(window.paypal));
+      existing.addEventListener('error', () => reject(new Error('sdk-load-failed')));
+      return;
+    }
+    const s = document.createElement('script');
+    s.id = 'paypal-sdk';
+    s.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(clientId)}&currency=${encodeURIComponent(window.PAYPAL_CURRENCY || 'USD')}&intent=capture`;
+    s.onload = () => resolve(window.paypal);
+    s.onerror = () => reject(new Error('sdk-load-failed'));
+    document.head.appendChild(s);
+  });
+}
+
+/** Render PayPal Buttons into #paypal-button-container, wired to our backend. */
+function initPayPalButtons() {
+  const container = document.getElementById('paypal-button-container');
+  if (!container || isPremiumUser() || !State.currentUser) return;
+
+  const fallback = document.getElementById('paypal-fallback');
+  const showFallback = (msg) => {
+    if (fallback) { fallback.textContent = msg; fallback.classList.remove('hidden'); }
+  };
+
+  loadPayPalSdk().then((paypal) => {
+    if (!paypal || !paypal.Buttons) return showFallback('PayPal недоступен. Попробуйте позже.');
+    container.innerHTML = '';
+    paypal.Buttons({
+      style: { layout: 'vertical', color: 'blue', shape: 'pill', label: 'pay', height: 45 },
+
+      // 1) Ask our backend to create the order (price is fixed server-side)
+      createOrder: async () => {
+        const { ok, data } = await AUTH.apiCall('/api/payment/paypal/create-order', 'POST', {});
+        if (!ok || !data.orderId) {
+          showNotification(data?.error || 'Не удалось создать заказ', 'error');
+          throw new Error(data?.error || 'create-order failed');
+        }
+        return data.orderId;
+      },
+
+      // 2) After buyer approves, capture on our backend and unlock Pro
+      onApprove: async (paypalData) => {
+        const { ok, data } = await AUTH.apiCall('/api/payment/paypal/capture-order', 'POST', {
+          orderId: paypalData.orderID,
+        });
+        if (ok && data.isPremium) {
+          if (data.user) { State.currentUser = data.user; AUTH.saveUser(data.user); }
+          else { State.currentUser = { ...State.currentUser, isPremium: 1 }; AUTH.saveUser(State.currentUser); }
+          showNotification('🎉 Добро пожаловать в UniWay Pro! Все функции разблокированы.', 'success');
+          State.dataLoaded = false;
+          navigate('student_dashboard');
+        } else {
+          showNotification(data?.error || 'Платёж не завершён', 'error');
+        }
+      },
+
+      onError: () => showNotification('Ошибка PayPal. Платёж не выполнен.', 'error'),
+      onCancel: () => showNotification('Оплата отменена', 'info'),
+    }).render('#paypal-button-container').catch(() => showFallback('Не удалось отрисовать кнопку PayPal.'));
+  }).catch((err) => {
+    if (err.message === 'no-client-id') {
+      showFallback('Приём платежей ещё не настроен (нет PAYPAL_CLIENT_ID).');
+    } else {
+      showFallback('Не удалось загрузить PayPal. Проверьте подключение.');
+    }
+  });
+}
+
 // ===== INIT =====
 async function init() {
   const path = window.location.pathname;
   const pageMap = {
     '/': 'home', '/catalog': 'catalog', '/login': 'login',
     '/register': 'register', '/about': 'about', '/interview': 'interview',
+    '/premium': 'premium',
   };
 
   if (path.startsWith('/student')) State.currentPage = path.replace('/student/', 'student_').replace('/', '') || 'student_dashboard';

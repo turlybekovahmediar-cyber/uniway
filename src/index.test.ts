@@ -76,6 +76,15 @@ const MOCK_COMPANY = {
   companyName: 'Kaspi Bank',
 }
 
+/** Студент с активным UniWay Pro */
+const MOCK_PRO = {
+  ...MOCK_STUDENT,
+  id: 'pro-001',
+  email: 'pro@uniway.kz',
+  isPremium: 1,
+  premiumSince: '2025-02-01T00:00:00.000Z',
+}
+
 /** Типичный пользователь-админ */
 const MOCK_ADMIN = {
   ...MOCK_STUDENT,
@@ -710,6 +719,131 @@ describe('GET /api/users/stats', () => {
     }, env)
 
     expect(res.status).toBe(403)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FREEMIUM / UNIWAY PRO
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('GET /api/interview/quota', () => {
+  it('200: free студент с исчерпанным лимитом → allowed=false', async () => {
+    // extraFirst handles the COUNT(*) weekly query → 1 interview already this week
+    const env = makeAuthEnv(MOCK_STUDENT, async () => ({ n: 1 }))
+    const res = await app.request('/api/interview/quota', {
+      headers: { Authorization: 'Bearer token' },
+    }, env)
+
+    expect(res.status).toBe(200)
+    const data = await res.json() as { allowed: boolean; remaining: number; isPremium: boolean }
+    expect(data.isPremium).toBe(false)
+    expect(data.allowed).toBe(false)
+    expect(data.remaining).toBe(0)
+  })
+
+  it('200: Pro студент → безлимит (allowed=true)', async () => {
+    const env = makeAuthEnv(MOCK_PRO)
+    const res = await app.request('/api/interview/quota', {
+      headers: { Authorization: 'Bearer token' },
+    }, env)
+
+    expect(res.status).toBe(200)
+    const data = await res.json() as { allowed: boolean; isPremium: boolean }
+    expect(data.isPremium).toBe(true)
+    expect(data.allowed).toBe(true)
+  })
+})
+
+describe('POST /api/interview/evaluate (freemium gate)', () => {
+  it('403: free студент сверх недельного лимита на первом вопросе', async () => {
+    const env = makeAuthEnv(MOCK_STUDENT, async () => ({ n: 1 }))
+    const res = await app.request('/api/interview/evaluate', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: 'Расскажи о себе', answer: 'Ответ '.repeat(10),
+        direction: 'IT', questionIndex: 0, totalQuestions: 5,
+      }),
+    }, env)
+
+    expect(res.status).toBe(403)
+    const data = await res.json() as { upgrade: boolean }
+    expect(data.upgrade).toBe(true)
+  })
+})
+
+describe('GET /api/submissions (feedback gating)', () => {
+  const evaluatedSub = {
+    id: 'sub-1', userId: 'user-001', taskId: 101,
+    status: 'evaluated', score: 88, feedback: 'СЕКРЕТНЫЙ построчный разбор от AI-ментора',
+  }
+
+  it('free студент: подробный фидбэк скрыт (только балл)', async () => {
+    const env = makeAuthEnv(MOCK_STUDENT)
+    env.DB.all = async () => ({ results: [evaluatedSub] })
+
+    const res = await app.request('/api/submissions', {
+      headers: { Authorization: 'Bearer token' },
+    }, env)
+
+    expect(res.status).toBe(200)
+    const data = await res.json() as { submissions: Array<{ score: number; feedback: string; feedbackLocked?: boolean }> }
+    expect(data.submissions[0].score).toBe(88)             // балл виден
+    expect(data.submissions[0].feedbackLocked).toBe(true)
+    expect(data.submissions[0].feedback).not.toContain('СЕКРЕТНЫЙ')
+  })
+
+  it('Pro студент: полный фидбэк доступен', async () => {
+    const env = makeAuthEnv(MOCK_PRO)
+    env.DB.all = async () => ({ results: [{ ...evaluatedSub, userId: 'pro-001' }] })
+
+    const res = await app.request('/api/submissions', {
+      headers: { Authorization: 'Bearer token' },
+    }, env)
+
+    expect(res.status).toBe(200)
+    const data = await res.json() as { submissions: Array<{ feedback: string; feedbackLocked?: boolean }> }
+    expect(data.submissions[0].feedback).toContain('СЕКРЕТНЫЙ')
+    expect(data.submissions[0].feedbackLocked).toBeUndefined()
+  })
+})
+
+describe('Payments (PayPal)', () => {
+  it('401: create-order без авторизации', async () => {
+    const env = makeEnv()
+    const res = await app.request('/api/payment/paypal/create-order', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    }, env)
+    expect(res.status).toBe(401)
+  })
+
+  it('401: capture-order без авторизации', async () => {
+    const env = makeEnv()
+    const res = await app.request('/api/payment/paypal/capture-order', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orderId: 'X' }),
+    }, env)
+    expect(res.status).toBe(401)
+  })
+
+  it('409: create-order если Pro уже активен', async () => {
+    const env = makeAuthEnv(MOCK_PRO)
+    const res = await app.request('/api/payment/paypal/create-order', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer token', 'Content-Type': 'application/json' },
+      body: '{}',
+    }, env)
+    expect(res.status).toBe(409)
+  })
+
+  it('400: capture-order без orderId', async () => {
+    const env = makeAuthEnv(MOCK_STUDENT)
+    const res = await app.request('/api/payment/paypal/capture-order', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer token', 'Content-Type': 'application/json' },
+      body: '{}',
+    }, env)
+    expect(res.status).toBe(400)
   })
 })
 

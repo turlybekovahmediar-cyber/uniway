@@ -15,9 +15,14 @@
     "TURNSTILE_SITE_KEY": "0x4AAAAAADhgTP2XYcAbO7b5",
     // Google OAuth PUBLIC client ID (safe to commit)
     // Get yours at console.developers.google.com → Credentials → OAuth 2.0 Client IDs
-    "GOOGLE_CLIENT_ID": "912406276350-iue24vppv4l04fpjfbokisvl6g0e4o7t.apps.googleusercontent.com"
+    "GOOGLE_CLIENT_ID": "912406276350-iue24vppv4l04fpjfbokisvl6g0e4o7t.apps.googleusercontent.com",
+    // PayPal PUBLIC client ID (safe to commit) + mode. Get yours at developer.paypal.com → Apps & Credentials.
+    // Use the Sandbox client ID while testing; switch PAYPAL_MODE to "live" with the live client ID in production.
+    "PAYPAL_CLIENT_ID": "",
+    "PAYPAL_MODE": "sandbox"
     // SECRETS (add via Cloudflare Pages dashboard → Settings → Environment Variables → Secrets):
     //   TURNSTILE_SECRET_KEY  — private key for server-side Turnstile verification
+    //   PAYPAL_CLIENT_SECRET  — private PayPal secret for server-side order create/capture
   },
   // "kv_namespaces": [
   //   {
