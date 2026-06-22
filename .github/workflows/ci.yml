@@ -104,7 +104,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=webapp-f21 --branch=main --commit-dirty=true
+          command: pages deploy dist --project-name=webapp --branch=main --commit-dirty=true
 
       - name: Notify success
         if: success()
