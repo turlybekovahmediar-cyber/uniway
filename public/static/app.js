@@ -2849,8 +2849,14 @@ async function handleRegister(e) {
   if (!name || !email || !password) {
     showFormError('reg-error','reg-error-text','Заполните все обязательные поля'); return;
   }
-  if (password.length < 6) {
-    showFormError('reg-error','reg-error-text','Пароль должен быть не менее 6 символов'); return;
+  if (password.length < 8) {
+    showFormError('reg-error','reg-error-text','Пароль должен быть не менее 8 символов'); return;
+  }
+  if (!/[A-Z]/.test(password)) {
+    showFormError('reg-error','reg-error-text','Пароль должен содержать заглавную букву'); return;
+  }
+  if (!/[0-9]/.test(password)) {
+    showFormError('reg-error','reg-error-text','Пароль должен содержать цифру'); return;
   }
   const termsChecked = document.getElementById('agree-terms')?.checked;
   if (!termsChecked) {

@@ -167,9 +167,14 @@ interface InterviewResult {
 }
 
 // ---- Zod schemas ----
+const StrongPassword = z.string()
+  .min(8, 'Пароль минимум 8 символов')
+  .regex(/[A-Z]/, 'Пароль должен содержать заглавную букву')
+  .regex(/[0-9]/, 'Пароль должен содержать цифру')
+
 const RegisterSchema = z.object({
   email: z.string().email('Неверный формат email'),
-  password: z.string().min(6, 'Пароль минимум 6 символов'),
+  password: StrongPassword,
   name: z.string().min(1, 'Имя обязательно'),
   role: z.enum(['student', 'company'], { message: 'Роль: student или company' }),
   direction: z.string().optional(),
@@ -198,7 +203,7 @@ const ProfileSchema = z.object({
 
 const ChangePasswordSchema = z.object({
   currentPassword: z.string().min(1),
-  newPassword: z.string().min(6, 'Новый пароль минимум 6 символов'),
+  newPassword: StrongPassword,
 })
 
 const SubmissionCreateSchema = z.object({
@@ -565,6 +570,54 @@ const CaptureOrderSchema = z.object({
   orderId: z.string().min(1, 'orderId обязателен'),
 })
 
+// ============================================================
+//  RATE LIMITING (D1-backed, fixed window per IP)
+// ============================================================
+
+/**
+ * Sliding fixed-window rate limiter backed by the `rate_limits` D1 table.
+ * Returns true if the request is allowed, false if the limit is exceeded.
+ * Fail-open: skips when there is no client IP (tests/local) or on any DB error
+ * (e.g. table not migrated yet) — we never block real users on infra issues.
+ */
+async function checkRateLimit(
+  db: D1Database,
+  action: string,
+  ip: string | undefined,
+  max: number,
+  windowSec: number
+): Promise<boolean> {
+  if (!ip) return true
+  try {
+    const key = `${action}:${ip}`
+    const now = Date.now()
+    const row = await db
+      .prepare('SELECT count, windowStart FROM rate_limits WHERE id = ?')
+      .bind(key)
+      .first<{ count: number; windowStart: number }>()
+
+    if (!row || now - Number(row.windowStart) > windowSec * 1000) {
+      // New window
+      await db
+        .prepare(`INSERT INTO rate_limits (id, count, windowStart) VALUES (?, 1, ?)
+                  ON CONFLICT(id) DO UPDATE SET count = 1, windowStart = ?`)
+        .bind(key, now, now)
+        .run()
+      return true
+    }
+    if (Number(row.count) >= max) return false
+    await db.prepare('UPDATE rate_limits SET count = count + 1 WHERE id = ?').bind(key).run()
+    return true
+  } catch {
+    return true // fail open — table missing or transient error must not block login
+  }
+}
+
+/** Extract the client IP from Cloudflare headers. */
+function clientIp(c: any): string | undefined {
+  return c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || undefined
+}
+
 // ---- Middleware: auth guard ----
 async function requireAuth(c: any, db: D1Database): Promise<User | null> {
   const token = getTokenFromRequest(c)
@@ -591,6 +644,8 @@ app.use('*', async (c, next) => {
   c.header('X-Frame-Options', 'DENY')
   c.header('Referrer-Policy', 'strict-origin-when-cross-origin')
   c.header('Permissions-Policy', 'geolocation=(), microphone=(), camera=(), payment=()')
+  // HSTS on dynamic responses too (_headers only covers static assets)
+  c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload')
   c.header(
     'Content-Security-Policy',
     [
@@ -631,6 +686,12 @@ app.use('/static/*', serveStatic({ root: './' }))
 // POST /api/auth/register
 app.post('/api/auth/register', async (c) => {
   const db = c.env.DB
+
+  // Rate limit: max 3 registrations per hour per IP
+  if (!await checkRateLimit(db, 'register', clientIp(c), 3, 3600)) {
+    return c.json({ error: 'Слишком много регистраций. Попробуйте позже.' }, 429)
+  }
+
   await seedAdmin(db)
 
   let raw: unknown
@@ -692,6 +753,12 @@ app.post('/api/auth/register', async (c) => {
 // POST /api/auth/login
 app.post('/api/auth/login', async (c) => {
   const db = c.env.DB
+
+  // Rate limit: max 5 login attempts per minute per IP (brute-force protection)
+  if (!await checkRateLimit(db, 'login', clientIp(c), 5, 60)) {
+    return c.json({ error: 'Слишком много попыток входа. Попробуйте через минуту.' }, 429)
+  }
+
   await seedAdmin(db)
 
   let raw: unknown
@@ -813,6 +880,26 @@ app.put('/api/auth/change-password', async (c) => {
   const newHash = await hashPassword(parsed.data.newPassword)
   await db.prepare('UPDATE users SET passwordHash=? WHERE id=?').bind(newHash, user.id).run()
   return c.json({ success: true, message: 'Пароль успешно изменён' })
+})
+
+// ============================================================
+//  HEALTH CHECK
+// ============================================================
+
+// GET /api/health — liveness + D1 connectivity (used by uptime checks / CI)
+app.get('/api/health', async (c) => {
+  let dbStatus = 'ok'
+  try {
+    await c.env.DB.prepare('SELECT 1').first()
+  } catch {
+    dbStatus = 'error'
+  }
+  const status = dbStatus === 'ok' ? 'ok' : 'degraded'
+  return c.json({
+    status,
+    db: dbStatus,
+    time: new Date().toISOString(),
+  }, status === 'ok' ? 200 : 503)
 })
 
 // ============================================================

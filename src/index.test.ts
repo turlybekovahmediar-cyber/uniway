@@ -848,6 +848,63 @@ describe('Payments (PayPal)', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// HEALTH + RATE LIMIT + PASSWORD STRENGTH
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('GET /api/health', () => {
+  it('200: возвращает статус и проверку БД', async () => {
+    const env = makeEnv()
+    const res = await app.request('/api/health', {}, env)
+    expect(res.status).toBe(200)
+    const data = await res.json() as { status: string; db: string }
+    expect(data.status).toBe('ok')
+    expect(data.db).toBe('ok')
+  })
+})
+
+describe('Rate limiting', () => {
+  it('429: превышен лимит попыток входа (с IP)', async () => {
+    // rate_limits row already at the cap within the current window
+    const env = makeEnv({ dbFirst: async () => ({ count: 5, windowStart: Date.now() }) })
+    const res = await app.request('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '1.2.3.4' },
+      body: JSON.stringify({ email: 'a@uniway.kz', password: 'whatever' }),
+    }, env)
+    expect(res.status).toBe(429)
+  })
+
+  it('без IP лимит пропускается (fail-open)', async () => {
+    // No CF-Connecting-IP → limiter skipped → normal 401 (user not found)
+    const env = makeEnv({ dbFirst: async () => null })
+    const res = await app.request('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'ghost@uniway.kz', password: 'Password123' }),
+    }, env)
+    expect(res.status).toBe(401)
+  })
+})
+
+describe('Password strength (register)', () => {
+  const tryRegister = (password: string) => app.request('/api/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'pw@uniway.kz', password, name: 'Тест', role: 'student' }),
+  }, makeEnv())
+
+  it('400: меньше 8 символов', async () => {
+    expect((await tryRegister('Pass1')).status).toBe(400)
+  })
+  it('400: без заглавной буквы', async () => {
+    expect((await tryRegister('password1')).status).toBe(400)
+  })
+  it('400: без цифры', async () => {
+    expect((await tryRegister('Password')).status).toBe(400)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // API DOCS & SECURITY
 // ─────────────────────────────────────────────────────────────────────────────
 

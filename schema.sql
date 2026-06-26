@@ -78,3 +78,10 @@ CREATE TABLE IF NOT EXISTS payments (
 -- Уникальность orderId — защита от двойного зачисления премиума
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_orderId ON payments(orderId);
 CREATE INDEX IF NOT EXISTS idx_payments_userId ON payments(userId);
+
+-- Таблица rate limiting (фиксированное окно по IP+действию)
+CREATE TABLE IF NOT EXISTS rate_limits (
+  id TEXT PRIMARY KEY,          -- "<action>:<ip>", напр. "login:1.2.3.4"
+  count INTEGER NOT NULL DEFAULT 0,
+  windowStart INTEGER NOT NULL  -- Unix ms начала окна
+);
