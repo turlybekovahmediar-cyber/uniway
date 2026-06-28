@@ -22,6 +22,8 @@ type Env = {
   GOOGLE_CLIENT_ID?: string        // public OAuth client ID from console.developers.google.com
   PAYPAL_CLIENT_ID?: string        // public PayPal client ID (used by frontend SDK + backend auth)
   PAYPAL_MODE?: string             // 'sandbox' (default) | 'live'
+  POSTHOG_KEY?: string             // public PostHog project API key (phc_...) for frontend analytics
+  POSTHOG_HOST?: string            // PostHog host, e.g. https://us.i.posthog.com
   // Secrets (add via dashboard "Secrets" — NOT in wrangler.jsonc):
   TURNSTILE_SECRET_KEY?: string    // private secret for server-side verification
   PAYPAL_CLIENT_SECRET?: string    // private PayPal secret for server-side order/capture
@@ -650,11 +652,11 @@ app.use('*', async (c, next) => {
     'Content-Security-Policy',
     [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://challenges.cloudflare.com https://accounts.google.com https://cdnjs.cloudflare.com https://www.paypal.com https://www.paypalobjects.com",
+      "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://challenges.cloudflare.com https://accounts.google.com https://cdnjs.cloudflare.com https://www.paypal.com https://www.paypalobjects.com https://*.posthog.com",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
       "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com",
       "img-src 'self' data: https:",
-      "connect-src 'self' https://challenges.cloudflare.com https://www.paypal.com https://www.sandbox.paypal.com",
+      "connect-src 'self' https://challenges.cloudflare.com https://www.paypal.com https://www.sandbox.paypal.com https://*.posthog.com",
       "frame-src https://challenges.cloudflare.com https://accounts.google.com https://www.paypal.com https://www.sandbox.paypal.com",
     ].join('; ')
   )
@@ -1453,6 +1455,53 @@ app.get('/api/users/stats', async (c) => {
   return c.json(payload)
 })
 
+// GET /api/admin/kpi — business KPIs (admin only): conversion, revenue, ARPU
+app.get('/api/admin/kpi', async (c) => {
+  const db = c.env.DB
+  const user = await requireAuth(c, db)
+  if (!user || user.role !== 'admin') return c.json({ error: 'Доступ запрещён' }, 403)
+
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+  const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+
+  const totalUsersRow = await db.prepare('SELECT COUNT(*) AS n FROM users').first<{ n: number }>()
+  const studentsRow = await db.prepare("SELECT COUNT(*) AS n FROM users WHERE role='student'").first<{ n: number }>()
+  const proRow = await db.prepare('SELECT COUNT(*) AS n FROM users WHERE isPremium=1').first<{ n: number }>()
+  const revenueRow = await db.prepare("SELECT COALESCE(SUM(amount),0) AS s, COUNT(*) AS n FROM payments WHERE status='COMPLETED'").first<{ s: number; n: number }>()
+  const signups7Row = await db.prepare('SELECT COUNT(*) AS n FROM users WHERE createdAt >= ?').bind(weekAgo).first<{ n: number }>()
+  const signups30Row = await db.prepare('SELECT COUNT(*) AS n FROM users WHERE createdAt >= ?').bind(monthAgo).first<{ n: number }>()
+  const pay7Row = await db.prepare("SELECT COALESCE(SUM(amount),0) AS s, COUNT(*) AS n FROM payments WHERE status='COMPLETED' AND createdAt >= ?").bind(weekAgo).first<{ s: number; n: number }>()
+
+  const totalUsers = totalUsersRow?.n ?? 0
+  const totalStudents = studentsRow?.n ?? 0
+  const payingUsers = proRow?.n ?? 0
+  const totalRevenue = Number(revenueRow?.s ?? 0)
+  const paymentsCount = revenueRow?.n ?? 0
+
+  // Conversion = paying / registered students (UniWay Pro targets students)
+  const conversionRate = totalStudents > 0 ? Math.round((payingUsers / totalStudents) * 1000) / 10 : 0
+  // ARPU = revenue per paying user (one-time model)
+  const arpu = payingUsers > 0 ? Math.round((totalRevenue / payingUsers) * 100) / 100 : 0
+
+  return c.json({
+    totalUsers,
+    totalStudents,
+    payingUsers,
+    conversionRate,        // %
+    totalRevenue,          // USD
+    paymentsCount,
+    arpu,                  // USD
+    price: Number(PRO_PRICE),
+    currency: PRO_CURRENCY,
+    last7d: {
+      signups: signups7Row?.n ?? 0,
+      revenue: Number(pay7Row?.s ?? 0),
+      payments: pay7Row?.n ?? 0,
+    },
+    last30dSignups: signups30Row?.n ?? 0,
+  })
+})
+
 // ============================================================
 //  GOOGLE OAUTH ROUTE
 // ============================================================
@@ -1658,6 +1707,8 @@ function getHTML(env?: Env): string {
   const googleClientId   = env?.GOOGLE_CLIENT_ID   || ''
   const paypalClientId   = env?.PAYPAL_CLIENT_ID   || ''
   const paypalCurrency   = 'USD'
+  const posthogKey       = env?.POSTHOG_KEY        || ''
+  const posthogHost      = env?.POSTHOG_HOST       || 'https://us.i.posthog.com'
   return `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -1694,7 +1745,14 @@ function getHTML(env?: Env): string {
     window.GOOGLE_CLIENT_ID   = '${googleClientId}';
     window.PAYPAL_CLIENT_ID   = '${paypalClientId}';
     window.PAYPAL_CURRENCY    = '${paypalCurrency}';
+    window.POSTHOG_KEY        = '${posthogKey}';
+    window.POSTHOG_HOST       = '${posthogHost}';
 </script>
+  ${posthogKey ? `<!-- PostHog product analytics (loaded only when POSTHOG_KEY is set) -->
+  <script>
+    !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug getPageViewId".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+    posthog.init(window.POSTHOG_KEY, { api_host: window.POSTHOG_HOST, person_profiles: 'identified_only', capture_pageview: true });
+  </script>` : ''}
 </head>
 <body class="font-sans bg-gray-50 text-gray-900">
   <div id="app"></div>

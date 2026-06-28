@@ -17,6 +17,7 @@ const State = {
   userInterviews: [],
   adminUsers: [],
   adminStats: null,
+  adminKpi: null,
   dataLoaded: false,
 };
 
@@ -331,6 +332,7 @@ function renderApp() {
     initGoogleButton();
   }
   if (State.currentPage === 'premium') {
+    Analytics.capture('premium page viewed');
     initPayPalButtons();
   }
 }
@@ -2437,15 +2439,18 @@ function renderAdminPanel() {
     Promise.all([
       AUTH.apiCall('/api/users/list'),
       AUTH.apiCall('/api/users/stats'),
-    ]).then(([usersRes, statsRes]) => {
+      AUTH.apiCall('/api/admin/kpi'),
+    ]).then(([usersRes, statsRes, kpiRes]) => {
       if (usersRes.ok) State.adminUsers = usersRes.data.users || [];
       if (statsRes.ok) State.adminStats = statsRes.data;
+      if (kpiRes.ok) State.adminKpi = kpiRes.data;
       renderApp();
     }).catch(() => {});
   }
 
   const adminUsers = State.adminUsers || [];
   const stats = State.adminStats;
+  const kpi = State.adminKpi;
   const students = adminUsers.filter(u => u.role === 'student');
   const companies = adminUsers.filter(u => u.role === 'company');
 
@@ -2483,6 +2488,27 @@ function renderAdminPanel() {
             <div class="text-xs text-gray-500">${s.label}</div>
           </div>
         `).join('')}
+      </div>
+
+      <!-- Business KPIs -->
+      <div class="mb-8">
+        <h2 class="text-lg font-black text-gray-900 mb-3 flex items-center gap-2"><i class="fas fa-chart-line text-primary-600"></i> Бизнес-метрики (UniWay Pro)</h2>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          ${[
+            { icon: 'fa-percent', label: 'Конверсия в Pro', val: kpi ? kpi.conversionRate + '%' : '—', sub: kpi ? `${kpi.payingUsers} из ${kpi.totalStudents} студентов` : '', color: 'green' },
+            { icon: 'fa-dollar-sign', label: 'Выручка', val: kpi ? '$' + kpi.totalRevenue.toFixed(2) : '—', sub: kpi ? `${kpi.paymentsCount} платежей` : '', color: 'blue' },
+            { icon: 'fa-crown', label: 'Платящих (Pro)', val: kpi ? kpi.payingUsers : '—', sub: 'isPremium = 1', color: 'orange' },
+            { icon: 'fa-coins', label: 'ARPU', val: kpi ? '$' + kpi.arpu.toFixed(2) : '—', sub: 'выручка / платящий', color: 'purple' },
+          ].map(s => `
+            <div class="card-flat">
+              <div class="feature-icon w-10 h-10 rounded-xl bg-${s.color}-50 text-${s.color}-600 text-base mb-2"><i class="fas ${s.icon}"></i></div>
+              <div class="text-2xl font-black text-gray-900">${s.val}</div>
+              <div class="text-xs text-gray-500">${s.label}</div>
+              ${s.sub ? `<div class="text-[11px] text-gray-400 mt-0.5">${s.sub}</div>` : ''}
+            </div>
+          `).join('')}
+        </div>
+        ${kpi ? `<div class="text-xs text-gray-400 mt-2">За 7 дней: +${kpi.last7d.signups} регистраций, $${kpi.last7d.revenue.toFixed(2)} выручки (${kpi.last7d.payments} платежей)</div>` : ''}
       </div>
 
       <div class="grid lg:grid-cols-2 gap-6">
@@ -2780,6 +2806,7 @@ function showNotification(text, type = 'success') {
 
 /** Modal nudging the user to upgrade to UniWay Pro. */
 function showUpgradePrompt(message) {
+  Analytics.capture('upgrade prompt shown', { message });
   const existing = document.getElementById('upgrade-modal');
   if (existing) existing.remove();
   const modal = document.createElement('div');
@@ -2800,6 +2827,49 @@ function showUpgradePrompt(message) {
     </div>`;
   document.body.appendChild(modal);
 }
+
+// ===== ANALYTICS (PostHog) =====
+// Thin wrapper around window.posthog. All methods no-op when PostHog isn't
+// loaded (no POSTHOG_KEY configured), so the app never breaks without it.
+const Analytics = {
+  ready() { return typeof window !== 'undefined' && window.posthog && typeof window.posthog.capture === 'function'; },
+
+  // Link events to a user profile (call on login / register / session restore)
+  identify(user) {
+    if (!this.ready() || !user) return;
+    try {
+      window.posthog.identify(String(user.id), {
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        plan: Number(user.isPremium) === 1 ? 'pro' : 'free',
+        direction: user.direction,
+        university: user.university,
+      });
+    } catch (e) {}
+  },
+
+  // Capture a product event. Always adds platform=web.
+  capture(event, props = {}) {
+    if (!this.ready()) return;
+    try { window.posthog.capture(event, { platform: 'web', ...props }); } catch (e) {}
+  },
+
+  // Reset identity on logout
+  reset() {
+    if (!this.ready()) return;
+    try { window.posthog.reset(); } catch (e) {}
+  },
+
+  // Feature flag check (sync; reads cached flags). Falls back to `def`.
+  flag(name, def = false) {
+    if (!this.ready() || typeof window.posthog.isFeatureEnabled !== 'function') return def;
+    try {
+      const v = window.posthog.isFeatureEnabled(name);
+      return v === undefined ? def : v;
+    } catch (e) { return def; }
+  },
+};
 
 // ===== AUTH SYSTEM =====
 // Uses real backend API + localStorage for token persistence
@@ -2886,6 +2956,8 @@ async function handleRegister(e) {
     AUTH.saveUser(data.user);
     State.currentUser = data.user;
     State.currentRole = data.user.role;
+    Analytics.identify(data.user);
+    Analytics.capture('user signed up', { method: 'email', role: data.user.role });
 
     showNotification(data.message || 'Регистрация прошла успешно!', 'success');
     setTimeout(() => {
@@ -2929,6 +3001,8 @@ async function handleLogin(e) {
     AUTH.saveUser(data.user);
     State.currentUser = data.user;
     State.currentRole = data.user.role;
+    Analytics.identify(data.user);
+    Analytics.capture('user logged in', { method: 'email', role: data.user.role });
 
     showNotification(data.message || `Добро пожаловать!`, 'success');
     setTimeout(() => {
@@ -2995,6 +3069,8 @@ async function handleGoogleCredentialResponse(response) {
     AUTH.saveUser(data.user);
     State.currentUser = data.user;
     State.currentRole = data.user.role;
+    Analytics.identify(data.user);
+    Analytics.capture('user logged in', { method: 'google', role: data.user.role });
     showNotification(data.message || 'Добро пожаловать!', 'success');
     setTimeout(() => {
       if (data.user.role === 'admin') navigate('admin');
@@ -3035,6 +3111,8 @@ function quickLogin(role) {
 
 // --- LOGOUT ---
 async function logout() {
+  Analytics.capture('user logged out');
+  Analytics.reset();
   try { await AUTH.apiCall('/api/auth/logout', 'POST'); } catch(_) {}
   AUTH.clearToken();
   State.currentUser = null;
@@ -3158,6 +3236,7 @@ async function startInterview() {
   State.interviewScore = 0;
   State.interviewMessages = [];
   State.interviewFinished = false;
+  Analytics.capture('interview started', { direction: dir });
   renderApp();
   setTimeout(() => {
     const questions = AI_INTERVIEW_QUESTIONS[dir] || AI_INTERVIEW_QUESTIONS.IT;
@@ -3314,6 +3393,7 @@ async function saveInterviewResult() {
     });
     if (ok) {
       State.userInterviews = [data.interview, ...(State.userInterviews || [])];
+      Analytics.capture('interview completed', { direction: dir, score });
       showNotification(`Результат ${score}/100 сохранён в профиле!`, 'success');
     } else {
       showNotification(data.error || 'Ошибка сохранения', 'error');
@@ -3388,6 +3468,7 @@ async function submitSolution() {
       // Update cached submissions
       State.userSubmissions = State.userSubmissions.filter(s => s.taskId !== task.id);
       State.userSubmissions.push(sub);
+      Analytics.capture('task submitted', { taskId: task.id, direction: task.direction, score });
       showNotification(`Решение отправлено! AI-оценка: ${score}/100`, 'success');
       if (sub.feedbackLocked) {
         // Free tier: score only — nudge toward Pro for the full breakdown
@@ -3587,12 +3668,15 @@ const FREE_FEATURES = [
 function renderPremiumPage() {
   const loggedIn = !!State.currentUser;
   const isPro = isPremiumUser();
+  // Feature-flagged promo banner (PostHog flag 'premium-promo' → A/B test offers)
+  const promo = Analytics.flag('premium-promo', false);
 
   return `
   <main class="pt-16 min-h-screen bg-gray-50">
     <!-- Hero -->
     <section class="bg-gradient-to-br from-primary-700 via-primary-600 to-primary-800 text-white">
       <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-16 text-center">
+        ${promo ? `<div class="inline-block bg-yellow-400 text-yellow-900 text-sm font-bold px-4 py-1.5 rounded-full mb-4">🎓 Студенческая скидка действует ограниченное время</div><br>` : ''}
         <span class="inline-flex items-center gap-2 bg-white/15 backdrop-blur px-4 py-1.5 rounded-full text-sm font-medium mb-5">
           <i class="fas fa-crown text-yellow-300"></i> UniWay Pro
         </span>
@@ -3717,9 +3801,11 @@ function initPayPalButtons() {
 
       // 1) Ask our backend to create the order (price is fixed server-side)
       createOrder: async () => {
+        Analytics.capture('checkout started', { plan: 'pro', amount: 29.99, currency: 'USD', gateway: 'paypal' });
         const { ok, data } = await AUTH.apiCall('/api/payment/paypal/create-order', 'POST', {});
         if (!ok || !data.orderId) {
           showNotification(data?.error || 'Не удалось создать заказ', 'error');
+          Analytics.capture('payment failed', { gateway: 'paypal', stage: 'create-order', error: data?.error });
           throw new Error(data?.error || 'create-order failed');
         }
         return data.orderId;
@@ -3733,16 +3819,19 @@ function initPayPalButtons() {
         if (ok && data.isPremium) {
           if (data.user) { State.currentUser = data.user; AUTH.saveUser(data.user); }
           else { State.currentUser = { ...State.currentUser, isPremium: 1 }; AUTH.saveUser(State.currentUser); }
+          Analytics.identify(State.currentUser);
+          Analytics.capture('payment completed', { $revenue: 29.99, currency: 'USD', plan: 'pro', gateway: 'paypal' });
           showNotification('🎉 Добро пожаловать в UniWay Pro! Все функции разблокированы.', 'success');
           State.dataLoaded = false;
           navigate('student_dashboard');
         } else {
+          Analytics.capture('payment failed', { gateway: 'paypal', stage: 'capture', error: data?.error });
           showNotification(data?.error || 'Платёж не завершён', 'error');
         }
       },
 
-      onError: () => showNotification('Ошибка PayPal. Платёж не выполнен.', 'error'),
-      onCancel: () => showNotification('Оплата отменена', 'info'),
+      onError: () => { Analytics.capture('payment failed', { gateway: 'paypal', stage: 'sdk' }); showNotification('Ошибка PayPal. Платёж не выполнен.', 'error'); },
+      onCancel: () => { Analytics.capture('payment cancelled', { gateway: 'paypal' }); showNotification('Оплата отменена', 'info'); },
     }).render('#paypal-button-container').catch(() => showFallback('Не удалось отрисовать кнопку PayPal.'));
   }).catch((err) => {
     if (err.message === 'no-client-id') {
@@ -3776,6 +3865,7 @@ async function init() {
     // Optimistically restore from cache
     State.currentUser = cachedUser;
     State.currentRole = cachedUser.role;
+    Analytics.identify(cachedUser);
 
     // Verify token with server in background
     AUTH.apiCall('/api/auth/me').then(({ ok, data }) => {
@@ -3784,6 +3874,7 @@ async function init() {
         State.currentUser = data.user;
         State.currentRole = data.user.role;
         AUTH.saveUser(data.user);
+        Analytics.identify(data.user);
         renderApp();
       } else {
         // Token invalid — clear session

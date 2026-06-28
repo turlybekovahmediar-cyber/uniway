@@ -904,6 +904,31 @@ describe('Password strength (register)', () => {
   })
 })
 
+describe('GET /api/admin/kpi', () => {
+  it('200: админ видит бизнес-метрики', async () => {
+    // extraFirst handles all the COUNT/SUM queries after auth lookup
+    const env = makeAuthEnv(MOCK_ADMIN, async () => ({ n: 4, s: 89.97 }))
+    const res = await app.request('/api/admin/kpi', {
+      headers: { Authorization: 'Bearer token' },
+    }, env)
+
+    expect(res.status).toBe(200)
+    const data = await res.json() as { conversionRate: number; totalRevenue: number; payingUsers: number; arpu: number }
+    expect(data).toHaveProperty('conversionRate')
+    expect(data).toHaveProperty('totalRevenue')
+    expect(data).toHaveProperty('payingUsers')
+    expect(data).toHaveProperty('arpu')
+  })
+
+  it('403: не-админ не имеет доступа', async () => {
+    const env = makeAuthEnv(MOCK_STUDENT)
+    const res = await app.request('/api/admin/kpi', {
+      headers: { Authorization: 'Bearer token' },
+    }, env)
+    expect(res.status).toBe(403)
+  })
+})
+
 // ─────────────────────────────────────────────────────────────────────────────
 // API DOCS & SECURITY
 // ─────────────────────────────────────────────────────────────────────────────
