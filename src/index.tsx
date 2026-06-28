@@ -620,6 +620,23 @@ function clientIp(c: any): string | undefined {
   return c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || undefined
 }
 
+// ============================================================
+//  STRUCTURED LOGGING (queryable JSON to Workers logs)
+// ============================================================
+
+/**
+ * Emit one structured JSON log line. Cloudflare captures stdout — view with
+ * `wrangler pages deployment tail` or the Pages dashboard → Logs.
+ * Used for security events (failed logins), payments, rate limiting, errors.
+ */
+function logEvent(event: string, data: Record<string, unknown> = {}): void {
+  try {
+    console.log(JSON.stringify({ ts: new Date().toISOString(), event, ...data }))
+  } catch {
+    // logging must never throw
+  }
+}
+
 // ---- Middleware: auth guard ----
 async function requireAuth(c: any, db: D1Database): Promise<User | null> {
   const token = getTokenFromRequest(c)
@@ -628,6 +645,17 @@ async function requireAuth(c: any, db: D1Database): Promise<User | null> {
 
 // ============================================================
 const app = new Hono<{ Bindings: Env; Variables: { ctx: ExecutionContext } }>()
+
+// Global error handler — log structured error, return generic message
+// (OWASP A05: never leak stack traces to clients)
+app.onError((err, c) => {
+  logEvent('error', {
+    path: c.req.path,
+    method: c.req.method,
+    message: err instanceof Error ? err.message : String(err),
+  })
+  return c.json({ error: 'Внутренняя ошибка сервера' }, 500)
+})
 
 // Restrict CORS to our known origin; fall back to Pages default if not set
 app.use('/api/*', async (c, next) => {
@@ -744,6 +772,8 @@ app.post('/api/auth/register', async (c) => {
 
   const user = await db.prepare('SELECT * FROM users WHERE id = ?').bind(id).first<User>()
 
+  logEvent('user_registered', { userId: id, role, ip: clientIp(c) })
+
   return c.json({
     success: true,
     token,
@@ -757,7 +787,9 @@ app.post('/api/auth/login', async (c) => {
   const db = c.env.DB
 
   // Rate limit: max 5 login attempts per minute per IP (brute-force protection)
-  if (!await checkRateLimit(db, 'login', clientIp(c), 5, 60)) {
+  const ip = clientIp(c)
+  if (!await checkRateLimit(db, 'login', ip, 5, 60)) {
+    logEvent('rate_limited', { action: 'login', ip })
     return c.json({ error: 'Слишком много попыток входа. Попробуйте через минуту.' }, 429)
   }
 
@@ -779,10 +811,16 @@ app.post('/api/auth/login', async (c) => {
     .bind(normalizedEmail)
     .first<User>()
 
-  if (!user) return c.json({ error: 'Пользователь с таким email не найден' }, 401)
+  if (!user) {
+    logEvent('login_failed', { email: normalizedEmail, ip, reason: 'no_user' })
+    return c.json({ error: 'Пользователь с таким email не найден' }, 401)
+  }
 
   const ok = await verifyPassword(parsed.data.password, user.passwordHash)
-  if (!ok) return c.json({ error: 'Неверный пароль' }, 401)
+  if (!ok) {
+    logEvent('login_failed', { email: normalizedEmail, ip, reason: 'bad_password' })
+    return c.json({ error: 'Неверный пароль' }, 401)
+  }
 
   // Transparently upgrade legacy SHA-256 hashes to PBKDF2 on successful login
   if (!user.passwordHash.startsWith('pbkdf2:')) {
@@ -799,6 +837,8 @@ app.post('/api/auth/login', async (c) => {
   if (Math.random() < 0.1) {
     scheduleTask(c.get('ctx'), () => bgPurgeSessions(c.env.DB))
   }
+
+  logEvent('login_ok', { userId: user.id, role: user.role, ip })
 
   return c.json({
     success: true,
@@ -1303,6 +1343,7 @@ app.post('/api/payment/paypal/capture-order', async (c) => {
     }
 
     if (!res.ok || data.status !== 'COMPLETED') {
+      logEvent('payment_failed', { userId: user.id, orderId, reason: 'not_completed', status: data.status ?? 'UNKNOWN' })
       return c.json({ error: 'Платёж не завершён', status: data.status ?? 'UNKNOWN' }, 402)
     }
 
@@ -1329,8 +1370,10 @@ app.post('/api/payment/paypal/capture-order', async (c) => {
     `).bind(generateId(), user.id, orderId, Number(paidValue), paidCurrency, 'COMPLETED', 'paypal', now).run()
 
     const updated = await db.prepare('SELECT * FROM users WHERE id = ?').bind(user.id).first<User>()
+    logEvent('payment_ok', { userId: user.id, orderId, amount: Number(paidValue), currency: paidCurrency })
     return c.json({ success: true, isPremium: true, user: updated ? safeUser(updated) : undefined })
   } catch {
+    logEvent('payment_failed', { userId: user.id, orderId, reason: 'paypal_error' })
     return c.json({ error: 'Ошибка связи с PayPal' }, 502)
   }
 })
