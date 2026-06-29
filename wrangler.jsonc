@@ -22,7 +22,7 @@
     "PAYPAL_MODE": "sandbox",
     // PostHog PUBLIC project API key (phc_..., safe to commit) — analytics no-op when empty.
     // Get yours at posthog.com → Project Settings → Project API Key.
-    "POSTHOG_KEY": "",
+    "POSTHOG_KEY": "phc_qV9tjdTyhzzEYvp4fP2jRRXYZGcwgjsuFv3xSaXWUbYG",
     "POSTHOG_HOST": "https://us.i.posthog.com"
     // SECRETS (add via Cloudflare Pages dashboard → Settings → Environment Variables → Secrets):
     //   TURNSTILE_SECRET_KEY  — private key for server-side Turnstile verification
