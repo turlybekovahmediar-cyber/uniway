@@ -8,8 +8,8 @@ class UniWayVisitor(HttpUser):
     def home(self):
         self.client.get("/", name="GET /")
 
-    @task(4)  # каталог заданий 
-    def tasks(self):
+    @task(4)  # каталог заданий
+    def browse_tasks(self):   # NB: метод нельзя называть 'tasks' — это зарезервированный атрибут Locust
         self.client.get("/api/tasks", name="GET /api/tasks")
 
     @task(3)  # фильтр по направлению

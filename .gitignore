@@ -4,6 +4,9 @@ dist/
 # test coverage
 coverage/
 
+# python (locust)
+__pycache__/
+
 # dev
 .yarn/
 !.yarn/releases
